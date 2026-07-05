@@ -78,7 +78,7 @@ type Store interface {
 	UpsertDevice(ctx context.Context, hash string, publicKey []byte, fp string) error
 
 	// Telemetry.
-	InsertTelemetry(ctx context.Context, t Telemetry) error
+	InsertTelemetry(ctx context.Context, t Telemetry) (int64, error)
 
 	// Sessions.
 	InsertSession(ctx context.Context, s Session) error

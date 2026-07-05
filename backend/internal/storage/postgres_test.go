@@ -77,11 +77,11 @@ func TestPostgresStore_InsertTelemetry(t *testing.T) {
 	sid := uuid.New()
 	ts := time.Now().UTC()
 
-	mock.ExpectExec(`INSERT INTO telemetry`).
+	mock.ExpectQuery(`INSERT INTO telemetry`).
 		WithArgs("hash", "fp", "turkcell", "whatsapp", "tls", 7.5, &sid, "", ts).
-		WillReturnResult(pgxmock.NewResult("INSERT", 1))
+		WillReturnRows(pgxmock.NewRows([]string{"id"}).AddRow(int64(42)))
 
-	require.NoError(t, s.InsertTelemetry(context.Background(), Telemetry{
+	id, err := s.InsertTelemetry(context.Background(), Telemetry{
 		DeviceIDHash: "hash",
 		PublicKeyFP:  "fp",
 		Operator:     "turkcell",
@@ -90,13 +90,15 @@ func TestPostgresStore_InsertTelemetry(t *testing.T) {
 		Entropy:      7.5,
 		SessionID:    &sid,
 		Timestamp:    ts,
-	}))
+	})
+	require.NoError(t, err)
+	require.Equal(t, int64(42), id)
 	require.NoError(t, mock.ExpectationsWereMet())
 }
 
 func TestPostgresStore_InsertTelemetry_RejectsMissingFields(t *testing.T) {
 	s, _ := newMockStore(t)
-	err := s.InsertTelemetry(context.Background(), Telemetry{
+	_, err := s.InsertTelemetry(context.Background(), Telemetry{
 		DeviceIDHash: "", // empty — must fail
 		PublicKeyFP:  "fp",
 		Operator:     "x",

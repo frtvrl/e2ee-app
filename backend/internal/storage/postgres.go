@@ -148,25 +148,30 @@ func (s *PostgresStore) UpsertDevice(ctx context.Context, hash string, publicKey
 	return nil
 }
 
-// InsertTelemetry appends one anonymized telemetry row.
+// InsertTelemetry appends one anonymized telemetry row and
+// returns the new row's database id (BIGSERIAL). The id lets
+// the REST handler echo it back to the client for log
+// cross-referencing during a test run.
 //
 // PRIVACY: This MUST be called only with already-anonymized data. The caller
 // (HTTP handler in PR-7) is responsible for:
 //   - hashing the device UUID with SERVER_SALT before sending;
 //   - masking the IP to /24 (IPv4) or /48 (IPv6) before sending;
 //   - never sending the public key (only its fingerprint).
-func (s *PostgresStore) InsertTelemetry(ctx context.Context, t Telemetry) error {
+func (s *PostgresStore) InsertTelemetry(ctx context.Context, t Telemetry) (int64, error) {
 	if t.DeviceIDHash == "" || t.PublicKeyFP == "" {
-		return fmt.Errorf("storage: InsertTelemetry: missing required device_id_hash / public_key_fp")
+		return 0, fmt.Errorf("storage: InsertTelemetry: missing required device_id_hash / public_key_fp")
 	}
-	if _, err := s.pool.Exec(ctx, `
+	var id int64
+	if err := s.pool.QueryRow(ctx, `
 		INSERT INTO telemetry
 		    (device_id_hash, public_key_fp, operator, app, tls_fp, entropy, session_id, ip_subnet, timestamp)
 		VALUES ($1, $2, $3, $4, $5, $6, $7, NULLIF($8, '')::inet, $9)
-	`, t.DeviceIDHash, t.PublicKeyFP, t.Operator, t.App, t.TLSFP, t.Entropy, t.SessionID, t.IPSubnet, t.Timestamp); err != nil {
-		return fmt.Errorf("storage: insert telemetry: %w", err)
+		RETURNING id
+	`, t.DeviceIDHash, t.PublicKeyFP, t.Operator, t.App, t.TLSFP, t.Entropy, t.SessionID, t.IPSubnet, t.Timestamp).Scan(&id); err != nil {
+		return 0, fmt.Errorf("storage: insert telemetry: %w", err)
 	}
-	return nil
+	return id, nil
 }
 
 // InsertSession stores a new test session row.

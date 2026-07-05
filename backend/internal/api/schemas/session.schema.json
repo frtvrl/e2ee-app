@@ -1,0 +1,106 @@
+{
+  "$id": "https://opene2ee.com/schemas/session/v1.json",
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "OpenE2EE Test Session",
+  "description": "Test oturumu metadata (mobile ↔ backend)",
+  "type": "object",
+  "required": [
+    "id",
+    "device_id_hash",
+    "mode",
+    "task_type",
+    "status",
+    "created_at"
+  ],
+  "properties": {
+    "id": {
+      "type": "string",
+      "description": "Oturum ID (UUID v4)",
+      "format": "uuid"
+    },
+    "device_id_hash": {
+      "type": "string",
+      "description": "Test başlatan cihaz (anonim)",
+      "minLength": 16,
+      "maxLength": 64
+    },
+    "receiver_device_id_hash": {
+      "type": "string",
+      "description": "P2P eşleşme alıcısı (anonim, eşleşmişse)",
+      "minLength": 16,
+      "maxLength": 64
+    },
+    "mode": {
+      "type": "string",
+      "description": "Eşleşme modu",
+      "enum": ["p2p", "echobot", "single"]
+    },
+    "task_type": {
+      "type": "string",
+      "description": "Test türü",
+      "enum": ["whatsapp_text", "whatsapp_image", "whatsapp_voice", "rcs_text", "rcs_image"]
+    },
+    "status": {
+      "type": "string",
+      "description": "Oturum durumu",
+      "enum": ["pending", "active", "completed", "failed", "timeout", "cancelled"]
+    },
+    "test_text": {
+      "type": "string",
+      "description": "Benzersiz test metni (karşıya gönderilecek)",
+      "maxLength": 256
+    },
+    "target_phone_hash": {
+      "type": "string",
+      "description": "Hedef telefon numarası hash'i (anonim, opsiyonel)",
+      "minLength": 16,
+      "maxLength": 64
+    },
+    "target_operator": {
+      "type": "string",
+      "description": "Hedef operatör (F12, MNP veya IP)",
+      "enum": [
+        "turkcell",
+        "vodafone_tr",
+        "turk_telekom",
+        "att",
+        "verizon",
+        "unknown"
+      ]
+    },
+    "result_score": {
+      "type": "number",
+      "description": "Sonuç skoru (0-100)",
+      "minimum": 0,
+      "maximum": 100
+    },
+    "result_confidence": {
+      "type": "number",
+      "description": "Sonuç güvenilirliği (0-1)",
+      "minimum": 0,
+      "maximum": 1
+    },
+    "error": {
+      "type": "string",
+      "description": "Hata mesajı (status=failed ise)"
+    },
+    "created_at": {
+      "type": "string",
+      "format": "date-time"
+    },
+    "started_at": {
+      "type": "string",
+      "format": "date-time"
+    },
+    "ended_at": {
+      "type": "string",
+      "format": "date-time"
+    },
+    "expires_at": {
+      "type": "string",
+      "description": "Oturum son kullanma (örn. 15dk nöbet)",
+      "format": "date-time"
+    }
+  },
+  "additionalProperties": false
+}

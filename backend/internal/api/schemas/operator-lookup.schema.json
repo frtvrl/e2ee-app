@@ -1,0 +1,81 @@
+{
+  "$id": "https://opene2ee.com/schemas/operator-lookup/v1.json",
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "OpenE2EE Operator Lookup",
+  "description": "Numara veya IP → operatör (MNP + IP reverse-lookup)",
+  "type": "object",
+  "required": ["query_type", "query_value", "timestamp"],
+  "properties": {
+    "query_type": {
+      "type": "string",
+      "description": "Sorgu tipi",
+      "enum": ["phone_e164", "phone_national", "ip_v4", "ip_v6", "asn"]
+    },
+    "query_value": {
+      "type": "string",
+      "description": "Sorgu değeri (E.164 numara veya IP)",
+      "maxLength": 64
+    },
+    "operator": {
+      "type": "string",
+      "description": "Tespit edilen operatör",
+      "enum": [
+        "turkcell",
+        "vodafone_tr",
+        "turk_telekom",
+        "att",
+        "verizon",
+        "tmobile_us",
+        "deutsche_telekom",
+        "orange",
+        "vodafone",
+        "o2",
+        "ee",
+        "three",
+        "unknown"
+      ]
+    },
+    "operator_name": {
+      "type": "string",
+      "description": "Operatör tam adı",
+      "maxLength": 128
+    },
+    "country": {
+      "type": "string",
+      "description": "Ülke (ISO 3166-1 alpha-2)",
+      "pattern": "^[A-Z]{2}$"
+    },
+    "mcc": {
+      "type": "string",
+      "description": "Mobile Country Code",
+      "pattern": "^[0-9]{3}$"
+    },
+    "mnc": {
+      "type": "string",
+      "description": "Mobile Network Code",
+      "pattern": "^[0-9]{2,3}$"
+    },
+    "source": {
+      "type": "string",
+      "description": "Tespit kaynağı",
+      "enum": ["tr_mnp_api", "ripe_whois", "arin_whois", "asn_db", "fallback_unknown"]
+    },
+    "confidence": {
+      "type": "number",
+      "description": "Tahmin güvenilirliği (0-1)",
+      "minimum": 0,
+      "maximum": 1
+    },
+    "timestamp": {
+      "type": "string",
+      "format": "date-time"
+    },
+    "cache_ttl_seconds": {
+      "type": "integer",
+      "description": "Cache TTL (saniye)",
+      "minimum": 0,
+      "maximum": 86400
+    }
+  },
+  "additionalProperties": false
+}
