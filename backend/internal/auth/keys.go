@@ -24,13 +24,17 @@ import (
 )
 
 // HashDeviceID derives the server-stable identifier for a UUID v7 +
-// salt. Output: hex-encoded SHA-256(salt || uuid)[:TruncateBytes] —
+// salt. Output: hex-encoded SHA-256(uuid || salt)[:TruncateBytes] —
 // 32 hex characters.
 //
-// Input order is salt FIRST, then uuid. The "salt first" convention
-// matches ADR-0006's domain-separation pattern (a salt prefix is
-// distinct from any user-controllable input). The exact contract is
-// pinned by TestHashDeviceID_KnownAnswer below.
+// Input order is uuid-bytes FIRST, then salt-bytes, per ADR-0006
+// §"Backend'de Saklanan". The "uuid first" ordering (a) is pinned by
+// the cross-system contract in mobile/lib/shared/device_identity.dart
+// so the device_id_hash a device sends at registration matches the
+// row the server stores, and (b) makes SHA-256 collisions between
+// different (uuid, salt) pairs and any convenience "salt-prefix"
+// hash pre-existing in the codebase structurally impossible. The
+// exact contract is pinned by TestHashDeviceID_KnownAnswer below.
 //
 // Determinism: same (uuid, salt) → same hash. Useful for idempotent
 // re-registration logic in storage (UpsertDevice).
@@ -38,7 +42,7 @@ import (
 // Reference vector (pinned by TestHashDeviceID_KnownAnswer):
 //   uuid = 01900000-0000-7000-8000-000000000001
 //   salt = "opene2ee-v1-salt"
-//   →    = "0a26ef7ed58d777eea5ccd0bc33307bb"
+//   →    = "40903d91f8f04d77d94e3d3b8eb97483"
 func HashDeviceID(u uuid.UUID, serverSalt []byte) (string, error) {
 	if u == uuid.Nil {
 		return "", fmt.Errorf("zero uuid: %w", ErrEmptyInput)
@@ -47,8 +51,8 @@ func HashDeviceID(u uuid.UUID, serverSalt []byte) (string, error) {
 		return "", fmt.Errorf("empty server salt: %w", ErrEmptyInput)
 	}
 	h := sha256.New()
-	h.Write(serverSalt)
 	h.Write(u[:])
+	h.Write(serverSalt)
 	sum := h.Sum(nil)
 	return hex.EncodeToString(sum[:TruncateBytes]), nil
 }
