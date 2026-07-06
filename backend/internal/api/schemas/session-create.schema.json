@@ -1,0 +1,50 @@
+{
+  "$id": "https://opene2ee.com/schemas/session-create/v1.json",
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "OpenE2EE Test Session Create (Request)",
+  "description": "Client-supplied subset for POST /api/v1/sessions. Server-side fields (id, status, created_at, started_at, ended_at, expires_at, result_score, result_confidence, error) are NOT accepted from the client — server mints them.",
+  "type": "object",
+  "required": ["device_id_hash", "mode", "task_type"],
+  "properties": {
+    "device_id_hash": {
+      "type": "string",
+      "minLength": 16,
+      "maxLength": 64
+    },
+    "receiver_device_id_hash": {
+      "type": "string",
+      "minLength": 16,
+      "maxLength": 64
+    },
+    "mode": {
+      "type": "string",
+      "enum": ["p2p", "echobot", "single"]
+    },
+    "task_type": {
+      "type": "string",
+      "enum": ["whatsapp_text", "whatsapp_image", "whatsapp_voice", "rcs_text", "rcs_image"]
+    },
+    "test_text": {
+      "type": "string",
+      "maxLength": 256
+    },
+    "target_phone_hash": {
+      "type": "string",
+      "minLength": 16,
+      "maxLength": 64
+    },
+    "target_operator": {
+      "type": "string",
+      "enum": ["turkcell", "vodafone_tr", "turk_telekom", "att", "verizon", "unknown"]
+    },
+    "public_key": {
+      "type": "string",
+      "description": "Base64-encoded Ed25519 public key (32 bytes after decode)"
+    },
+    "public_key_fp": {
+      "type": "string",
+      "description": "SHA-256 fingerprint of the public key (hex)"
+    }
+  },
+  "additionalProperties": false
+}

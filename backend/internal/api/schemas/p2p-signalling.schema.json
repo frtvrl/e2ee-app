@@ -1,0 +1,80 @@
+{
+  "$id": "https://opene2ee.com/schemas/p2p-signalling/v1.json",
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "OpenE2EE P2P Signalling",
+  "description": "WebRTC SDP/ICE relay (WebSocket üzerinden)",
+  "type": "object",
+  "required": ["type", "from", "to", "session_id", "timestamp"],
+  "properties": {
+    "type": {
+      "type": "string",
+      "description": "Mesaj tipi",
+      "enum": [
+        "join",
+        "leave",
+        "offer",
+        "answer",
+        "ice_candidate",
+        "renegotiate",
+        "bye",
+        "error"
+      ]
+    },
+    "from": {
+      "type": "string",
+      "description": "Gönderen cihaz (anonim hash)",
+      "minLength": 16,
+      "maxLength": 64
+    },
+    "to": {
+      "type": "string",
+      "description": "Alıcı cihaz (anonim hash, broadcast için boş)",
+      "minLength": 16,
+      "maxLength": 64
+    },
+    "session_id": {
+      "type": "string",
+      "format": "uuid"
+    },
+    "payload": {
+      "type": "object",
+      "description": "Mesaj tipine göre payload",
+      "oneOf": [
+        {
+          "properties": {
+            "sdp": {
+              "type": "string",
+              "description": "SDP offer/answer (base64)"
+            },
+            "sdp_type": {
+              "type": "string",
+              "enum": ["offer", "answer"]
+            }
+          },
+          "required": ["sdp", "sdp_type"]
+        },
+        {
+          "properties": {
+            "candidate": {
+              "type": "string",
+              "description": "ICE candidate (SDP format)"
+            },
+            "sdpMid": {
+              "type": "string"
+            },
+            "sdpMLineIndex": {
+              "type": "integer",
+              "minimum": 0
+            }
+          },
+          "required": ["candidate"]
+        }
+      ]
+    },
+    "timestamp": {
+      "type": "string",
+      "format": "date-time"
+    }
+  },
+  "additionalProperties": false
+}

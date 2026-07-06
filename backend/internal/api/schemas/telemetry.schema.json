@@ -1,0 +1,125 @@
+{
+  "$id": "https://opene2ee.com/schemas/telemetry/v1.json",
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "OpenE2EE Telemetry",
+  "description": "Anonim E2EE bütünlük skoru (mobile → backend)",
+  "type": "object",
+  "required": [
+    "device_id_hash",
+    "public_key_fp",
+    "operator",
+    "app",
+    "tls_fp",
+    "entropy",
+    "timestamp"
+  ],
+  "properties": {
+    "device_id_hash": {
+      "type": "string",
+      "description": "SHA-256(UUID v7 + server_salt)[:16]",
+      "minLength": 16,
+      "maxLength": 64,
+      "pattern": "^[a-f0-9]+$"
+    },
+    "public_key_fp": {
+      "type": "string",
+      "description": "SHA-256(Ed25519 public_key)[:16]",
+      "minLength": 16,
+      "maxLength": 32,
+      "pattern": "^[a-f0-9]+$"
+    },
+    "operator": {
+      "type": "string",
+      "description": "Tespit edilen operatör (MNP veya IP reverse-lookup)",
+      "enum": [
+        "turkcell",
+        "vodafone_tr",
+        "turk_telekom",
+        "att",
+        "verizon",
+        "tmobile_us",
+        "deutsche_telekom",
+        "orange",
+        "vodafone",
+        "o2",
+        "ee",
+        "three",
+        "unknown"
+      ]
+    },
+    "operator_source": {
+      "type": "string",
+      "description": "Operatör tespit yöntemi",
+      "enum": ["mnp", "ip_reverse", "asn_db", "unknown"]
+    },
+    "app": {
+      "type": "string",
+      "description": "Test edilen uygulama",
+      "enum": ["whatsapp", "rcs", "telegram", "signal"]
+    },
+    "tls_fp": {
+      "type": "string",
+      "description": "TLS Client Hello fingerprint (SHA-256 hex)",
+      "minLength": 16,
+      "maxLength": 128,
+      "pattern": "^[a-f0-9]+$"
+    },
+    "tls_version": {
+      "type": "string",
+      "description": "TLS versiyonu",
+      "enum": ["TLSv1.0", "TLSv1.1", "TLSv1.2", "TLSv1.3"]
+    },
+    "cipher_suites": {
+      "type": "array",
+      "description": "Desteklenen cipher suites (Client Hello)",
+      "items": {
+        "type": "string"
+      }
+    },
+    "entropy": {
+      "type": "number",
+      "description": "Payload entropy (Shannon, 0-8 bit/byte)",
+      "minimum": 0,
+      "maximum": 8
+    },
+    "sni": {
+      "type": "string",
+      "description": "Server Name Indication (domain)",
+      "maxLength": 253
+    },
+    "session_id": {
+      "type": "string",
+      "description": "İlgili test oturumu ID",
+      "format": "uuid"
+    },
+    "match_mode": {
+      "type": "string",
+      "description": "Test eşleşme modu",
+      "enum": ["p2p", "echobot", "single"]
+    },
+    "peer_score": {
+      "type": "number",
+      "description": "Karşı tarafın skoru (P2P/Echo-Bot)",
+      "minimum": 0,
+      "maximum": 100
+    },
+    "confidence": {
+      "type": "number",
+      "description": "Skor güvenilirliği (0-1)",
+      "minimum": 0,
+      "maximum": 1
+    },
+    "timestamp": {
+      "type": "string",
+      "description": "Telemetri üretim zamanı (RFC 3339)",
+      "format": "date-time"
+    },
+    "signature": {
+      "type": "string",
+      "description": "Ed25519 imzası (opsiyonel, F9 şimdilik devre dışı)",
+      "minLength": 64,
+      "maxLength": 128
+    }
+  },
+  "additionalProperties": false
+}

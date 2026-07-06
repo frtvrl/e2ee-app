@@ -1,0 +1,412 @@
+# ============================================================================
+# OpenE2EE — Development Docker Compose
+# ----------------------------------------------------------------------------
+# Sprint 1 (HANDOFF.md §4.3 PR-13) — local dev ortamı.
+#
+# Servisler (default profile):
+#   postgres     PostgreSQL 16 + TimescaleDB extension (internal network)
+#   redis        Redis 7 (internal network, Active Pool + rate-limit cache)
+#   backend      OpenE2EE Go backend (REST + WebSocket)
+#   kong         Kong Gateway 3.x DB-less (TLS termination, rate-limit, CORS)
+#   coturn       Coturn TURN/STUN (public UDP/TCP bypass, WebRTC relay)
+#
+# Profiles (alternative):
+#   nginx        --profile nginx     Nginx reverse proxy (Kong yerine)
+#
+# Networks (HANDOFF §4.3):
+#   internal     sadece postgres + redis (DB seviyesi izolasyon)
+#   external     kong + backend + coturn (external trafik + admin)
+#
+# Volumes:
+#   postgres_data   Postgres + TimescaleDB data persistence
+#   redis_data      Redis AOF persistence
+#   kong_config     Kong declarative config (kong.yml) read-only mount
+#   certbot_data    Let's Encrypt certs (prod); dev'de boş
+#
+# Çalıştırma:
+#   cp infra/.env.example infra/.env  # secret'ları set et
+#   docker compose -f infra/docker-compose.yml --env-file infra/.env up -d
+#
+# Not: Bu makinede Docker kurulu olmayabilir (PR-13 varsayımı); runtime
+# test Sprint 2 / CI'da. Bu dosya sadece `docker compose config` ile
+# syntax doğrulaması içindir.
+# ============================================================================
+
+name: opene2ee
+
+# ----------------------------------------------------------------------------
+# x-anchors — DRY templates for repeated fields
+# ----------------------------------------------------------------------------
+x-logging: &default-logging
+  driver: json-file
+  options:
+    max-size: "10m"
+    max-file: "3"
+
+x-restart: &default-restart
+  restart: unless-stopped
+
+# ----------------------------------------------------------------------------
+# Networks
+# ----------------------------------------------------------------------------
+networks:
+  internal:
+    driver: bridge
+    name: opene2ee-internal
+    ipam:
+      config:
+        - subnet: 172.30.0.0/24
+  external:
+    driver: bridge
+    name: opene2ee-external
+    ipam:
+      config:
+        - subnet: 172.31.0.0/24
+
+# ----------------------------------------------------------------------------
+# Volumes
+# ----------------------------------------------------------------------------
+volumes:
+  postgres_data:
+    name: opene2ee-postgres-data
+    driver: local
+  redis_data:
+    name: opene2ee-redis-data
+    driver: local
+  certbot_data:
+    name: opene2ee-certbot-data
+    driver: local
+  certbot_www:
+    name: opene2ee-certbot-www
+    driver: local
+  coturn_data:
+    name: opene2ee-coturn-data
+    driver: local
+  backend_logs:
+    name: opene2ee-backend-logs
+    driver: local
+
+# ----------------------------------------------------------------------------
+# Secrets — DOSYA tabanlı (production tavsiye edilen yol)
+# ----------------------------------------------------------------------------
+# Dev ortamı .env ile yeterli (environment: blokları ${VAR} ile çeker).
+# Üretimde docker secrets (file provider) tercih edilir:
+#   1. mkdir -p ../.secrets
+#   2. openssl rand -hex 32 > ../.secrets/postgres_password.txt
+#   3. openssl rand -hex 32 > ../.secrets/redis_password.txt
+#   4. openssl rand -hex 32 > ../.secrets/server_salt.txt
+#   5. openssl rand -hex 32 > ../.secrets/coturn_static_secret.txt
+# .gitignore zaten *.txt / *.pem / secrets/ ignore eder.
+# Bu blok opsiyoneldir — servisler *_FILE değişkenlerine geçirilerek
+# etkinleştirilir (aşağıdaki service definition'lara bakın).
+secrets:
+  postgres_password:
+    file: ../.secrets/postgres_password.txt
+  redis_password:
+    file: ../.secrets/redis_password.txt
+  server_salt:
+    file: ../.secrets/server_salt.txt
+  coturn_static_secret:
+    file: ../.secrets/coturn_static_secret.txt
+
+# ============================================================================
+# Services
+# ============================================================================
+services:
+
+  # --------------------------------------------------------------------------
+  # PostgreSQL 16 + TimescaleDB extension
+  # --------------------------------------------------------------------------
+  # ADR-0007 §Servisler; internal-only (sadece backend ile konuşur).
+  # TimescaleDB extension otomatik yüklenir (image içinde var).
+  # seed.sql volume mount ile ilk başlatmada otomatik çalıştırılır.
+  # --------------------------------------------------------------------------
+  postgres:
+    <<: *default-restart
+    image: timescale/timescaledb-ha:pg16
+    container_name: opene2ee-postgres
+    hostname: postgres
+    environment:
+      POSTGRES_DB: ${POSTGRES_DB:-opene2ee}
+      POSTGRES_USER: ${POSTGRES_USER:-opene2ee}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?POSTGRES_PASSWORD gerekli (bkz infra/.env.example)}
+      POSTGRES_INITDB_ARGS: "--encoding=UTF8 --locale=C"
+      # TimescaleDB tuning
+      TS_TUNE_MEMORY: "2GB"
+      TS_TUNE_NUM_CPUS: "2"
+    volumes:
+      - postgres_data:/home/postgres/pgdata/data:Z
+      # seed.sql ilk başlatmada otomatik çalıştırılır.
+      # Container zaten initialize edilmişse bu dosya atlanır (initdb idempotent değil).
+      - ./seed.sql:/docker-entrypoint-initdb.d/01-seed.sql:ro
+    networks:
+      - internal
+    # Internal-only — host'tan direkt erişim yok (compose restart ile yine
+    # de açılabilir; üretimde ağ policy ile sıkılaştırılacak).
+    expose:
+      - "5432"
+    ports:
+      # Sadece dev için host'a aç (debug/psql); üretimde kaldırılacak.
+      - "${POSTGRES_HOST_PORT:-5432}:5432"
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-opene2ee} -d ${POSTGRES_DB:-opene2ee}"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 30s
+    logging: *default-logging
+    security_opt:
+      - no-new-privileges:true
+    ulimits:
+      nofile:
+        soft: 65536
+        hard: 65536
+
+  # --------------------------------------------------------------------------
+  # Redis 7 — Active Pool (PR-6 matching) + cache
+  # --------------------------------------------------------------------------
+  # AOF (Append-Only File) persistence: every second fsync.
+  # Internal-only.
+  # --------------------------------------------------------------------------
+  redis:
+    <<: *default-restart
+    image: redis:7-alpine
+    container_name: opene2ee-redis
+    hostname: redis
+    command:
+      - "redis-server"
+      - "--appendonly"
+      - "yes"
+      - "--appendfsync"
+      - "everysec"
+      - "--maxmemory"
+      - "${REDIS_MAXMEMORY:-256mb}"
+      - "--maxmemory-policy"
+      - "allkeys-lru"
+      - "--save"
+      - "900 1"
+      - "--save"
+      - "300 10"
+      - "--bind"
+      - "0.0.0.0"
+      - "--protected-mode"
+      - "no"
+      # Dev ortamı şifresiz; üretimde requirepass eklenmeli.
+    volumes:
+      - redis_data:/data
+    networks:
+      - internal
+    expose:
+      - "6379"
+    ports:
+      - "${REDIS_HOST_PORT:-6379}:6379"
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 3s
+      retries: 5
+      start_period: 10s
+    logging: *default-logging
+    security_opt:
+      - no-new-privileges:true
+
+  # --------------------------------------------------------------------------
+  # OpenE2EE Backend — Go HTTP server (PR-8 wire-up)
+  # --------------------------------------------------------------------------
+  # Backend/.dockerignore yok (gerekirse eklenir); Dockerfile ./backend altında.
+  # Build context: bir üst dizin (compose -f infra/docker-compose.yml kullanılırken).
+  # --------------------------------------------------------------------------
+  backend:
+    <<: *default-restart
+    build:
+      context: ../backend
+      dockerfile: Dockerfile
+    image: opene2ee-backend:dev
+    container_name: opene2ee-backend
+    hostname: backend
+    environment:
+      # Backend'in env contract'ı: backend/cmd/server/main.go (PR-8)
+      SERVER_PORT: "${SERVER_PORT:-8080}"
+      DATABASE_URL: "postgres://${POSTGRES_USER:-opene2ee}:${POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB:-opene2ee}?sslmode=disable"
+      REDIS_ADDR: "redis:6379"
+      REDIS_PASSWORD: "${REDIS_PASSWORD:-}"
+      SERVER_SALT: "${SERVER_SALT:?SERVER_SALT gerekli (32+ char önerilir)}"
+      SHUTDOWN_TIMEOUT_SEC: "${SHUTDOWN_TIMEOUT_SEC:-30}"
+      HEALTHCHECK_TIMEOUT_MS: "${HEALTHCHECK_TIMEOUT_MS:-2000}"
+      # Log seviyesi (opsiyonel)
+      LOG_LEVEL: "${LOG_LEVEL:-info}"
+    volumes:
+      # Backend logları host'tan da erişilebilir olsun
+      - backend_logs:/var/log/opene2ee
+    networks:
+      - internal
+      - external
+    # Host'a açmayız — sadece Kong üzerinden erişilir.
+    # Dev için istersen expose edebilirsin; default'ta external network üzerinden
+    # Kong -> backend:8080 path yeterli.
+    expose:
+      - "8080"
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD-SHELL", "wget -qO- http://localhost:8080/healthz || exit 1"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 20s
+    logging: *default-logging
+    security_opt:
+      - no-new-privileges:true
+    # Restart policy: backend crash olursa postgres/redis hazır olduğunda
+    # otomatik ayağa kalksın; depends_on bunu zaten sağlar.
+    stop_grace_period: 30s
+
+  # --------------------------------------------------------------------------
+  # Kong Gateway 3.x (DB-less / declarative)
+  # --------------------------------------------------------------------------
+  # ADR-0007 §Kong Konfigürasyonu. kong.yml declarative config repo'da
+  # versiyonlanır (GitOps). KONG_DATABASE=off + KONG_DECLARATIVE_CONFIG
+  # otomatik yüklenir.
+  # --------------------------------------------------------------------------
+  kong:
+    <<: *default-restart
+    image: kong:3.8-alpine
+    container_name: opene2ee-kong
+    hostname: kong
+    environment:
+      KONG_DATABASE: "off"
+      KONG_DECLARATIVE_CONFIG: "/etc/kong/kong.yml"
+      KONG_PROXY_LISTEN: "0.0.0.0:8000, 0.0.0.0:8443 ssl"
+      KONG_ADMIN_LISTEN: "0.0.0.0:8001"
+      KONG_STATUS_LISTEN: "0.0.0.0:8100"
+      KONG_LOG_LEVEL: "${KONG_LOG_LEVEL:-info}"
+      KONG_PLUGINS: "bundled,cors,prometheus,bot-detection,rate-limiting"
+      KONG_NGINX_WORKER_PROCESSES: "2"
+      # Dev modunda CORS preflight vb. serbest; üretimde kapatılır.
+      KONG_ADMIN_ERROR_LOG: /dev/stderr
+      KONG_PROXY_ACCESS_LOG: /dev/stdout
+    volumes:
+      - ./kong/kong.yml:/etc/kong/kong.yml:ro
+    networks:
+      - external
+    ports:
+      - "${KONG_PROXY_HTTP_PORT:-8000}:8000"
+      - "${KONG_PROXY_HTTPS_PORT:-8443}:8443"
+      # Admin API — sadece dev için host'a açık; üretimde internal-only olmalı.
+      - "${KONG_ADMIN_PORT:-8001}:8001"
+    depends_on:
+      backend:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD-SHELL", "kong health"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 30s
+    logging: *default-logging
+    security_opt:
+      - no-new-privileges:true
+
+  # --------------------------------------------------------------------------
+  # Coturn TURN/STUN server
+  # --------------------------------------------------------------------------
+  # RFC 5766 (TURN) + RFC 5389 (STUN). WebRTC için public UDP/TCP relay.
+  # Kong Bypass — HTTP proxy'lerden geçemez (UDP).
+  # Dış portlar doğrudan host'a açılır.
+  # --------------------------------------------------------------------------
+  coturn:
+    <<: *default-restart
+    image: coturn/coturn:4.6
+    container_name: opene2ee-coturn
+    hostname: coturn
+    # network_mode: host KULLANMA — external bridge ağ üzerinden gidelim
+    # ki docker DNS / healthcheck çalışsın. Prod'da net=host + firewall tercih edilir.
+    command: >
+      -n
+      --log-file=stdout
+      --realm=${COTURN_REALM:-opene2ee.local}
+      --static-auth-secret=${COTURN_STATIC_SECRET:?COTURN_STATIC_SECRET gerekli}
+      --use-auth-secret
+      --no-tls
+      --no-dtls
+      --listening-port=${COTURN_LISTEN_PORT:-3478}
+      --min-port=${COTURN_MIN_PORT:-49152}
+      --max-port=${COTURN_MAX_PORT:-65535}
+      --fingerprint
+      --no-multicast-peers
+      --no-cli
+      --no-tcp-relay
+      --stale-nonce=600
+      --no-loopback-peers
+      --no-multicast-peers
+      --allowed-peer-ip=${COTURN_PUBLIC_IP:?COTURN_PUBLIC_IP gerekli (host'un dış IP'si)}
+    volumes:
+      - ./coturn/turnserver.conf:/etc/coturn/turnserver.conf:ro
+      - coturn_data:/var/lib/coturn
+    networks:
+      - external
+    ports:
+      # STUN/TURN UDP+TCP (RFC 5766)
+      - "${COTURN_LISTEN_PORT:-3478}:3478/udp"
+      - "${COTURN_LISTEN_PORT:-3478}:3478/tcp"
+      # TURN-over-TLS (opsiyonel, dev'de kapalı)
+      # - "${COTURN_TLS_PORT:-5349}:5349/tcp"
+      # - "${COTURN_TLS_PORT:-5349}:5349/udp"
+      # Port range for relay
+      - "${COTURN_MIN_PORT:-49152}-${COTURN_MAX_PORT:-65535}:${COTURN_MIN_PORT:-49152}-${COTURN_MAX_PORT:-65535}/udp"
+    healthcheck:
+      test: ["CMD-SHELL", "nc -z -u 127.0.0.1 ${COTURN_LISTEN_PORT:-3478} || exit 1"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 10s
+    logging: *default-logging
+    security_opt:
+      - no-new-privileges:true
+
+  # --------------------------------------------------------------------------
+  # Nginx — alternatif reverse proxy (Kong yerine)
+  # --------------------------------------------------------------------------
+  # Sadece --profile nginx ile başlatılır.
+  # Kong + Nginx aynı anda çalışmaz (port çakışması).
+  # --------------------------------------------------------------------------
+  nginx:
+    <<: *default-restart
+    image: nginx:alpine
+    container_name: opene2ee-nginx
+    hostname: nginx
+    profiles:
+      - nginx
+    volumes:
+      - ./nginx/nginx.conf:/etc/nginx/nginx.conf:ro
+      # Let's Encrypt cert'leri (prod); dev'de mkcert kullanılır.
+      - certbot_data:/etc/letsencrypt:ro
+      - certbot_www:/var/www/certbot:ro
+    networks:
+      - external
+    ports:
+      - "${NGINX_HTTP_PORT:-80}:80"
+      - "${NGINX_HTTPS_PORT:-443}:443"
+    depends_on:
+      backend:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD-SHELL", "wget -qO- http://localhost/healthz || exit 1"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 10s
+    logging: *default-logging
+    security_opt:
+      - no-new-privileges:true
+
+# ============================================================================
+# Default + Profile compose notes
+# ============================================================================
+# Kong ile Nginx aynı anda çalıştırma — port 80/443 çakışır.
+# Kong default:  docker compose -f infra/docker-compose.yml up -d
+# Nginx alternatifi: docker compose -f infra/docker-compose.yml --profile nginx up -d
+# ============================================================================
