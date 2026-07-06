@@ -13,7 +13,7 @@ Kong 3.x running in **DB-less declarative mode** (no Postgres/DB backing).
 Three plugins enabled on the `e2ee-backend` service → `/api/v1` route:
 
 1. **rate-limiting** — 60 req/min, 1000 req/hour, `policy: local` (in-memory, DB-less uyumlu)
-2. **cors** — origins `*`, methods GET/POST/DELETE, headers Content-Type/Authorization/X-Request-ID
+2. **cors** — explicit allowlist: `https://app.opene2ee.com` (prod), `https://staging.opene2ee.com` (staging), `http://localhost:3000` + `http://localhost:8080` (dev); methods GET/POST/DELETE; headers Content-Type/Authorization/X-Request-ID
 3. **bot-detection** — allowlist: `curl`, `wget`, `OpenE2EE/*`
 
 Disable a plugin: edit `kong.yml` → remove the entry → `docker compose restart kong`.
@@ -36,4 +36,4 @@ curl -s http://localhost:8001/status | jq .
 
 - **SSL termination** lives on the Nginx profile-based layer (port 443), Kong port 8000 (proxy) + 8001 (admin) stay on internal network
 - **certbot + Let's Encrypt** integrates via Nginx profile; Kong sees HTTPS traffic after Nginx
-- Replace CORS `origins: "*"` with explicit allowlist (e.g. `https://app.opene2ee.com`) in production
+- CORS `origins` is an explicit allowlist (production + staging + dev). Wildcard `"*"` must NOT be used — see `kong.yml` for the canonical list.

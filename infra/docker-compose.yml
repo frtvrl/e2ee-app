@@ -382,7 +382,11 @@ services:
       - nginx
     volumes:
       - ./nginx/nginx.conf:/etc/nginx/nginx.conf:ro
-      # Let's Encrypt cert'leri (prod); dev'de mkcert kullanılır.
+      # Let's Encrypt cert'leri (prod); dev'de boş.
+      # certbot_data mounts to /etc/letsencrypt — certbot standard layout
+      # writes certs to /etc/letsencrypt/live/<domain>/{fullchain,privkey}.pem.
+      # Must match ssl_certificate / ssl_certificate_key paths in
+      # infra/nginx/nginx.conf and infra/nginx/README.md.
       - certbot_data:/etc/letsencrypt:ro
       - certbot_www:/var/www/certbot:ro
     networks:

@@ -61,6 +61,8 @@ const (
 	SourceRIPEWhois    Source = "ripe_whois"
 	SourceARINWhois    Source = "arin_whois"
 	SourceASNDB        Source = "asn_db"
+	SourceBTKFeed      Source = "btk_feed"
+	SourceRDAP         Source = "rdap"
 	SourceFallbackUnknown Source = "fallback_unknown"
 )
 
@@ -100,8 +102,19 @@ var (
 )
 
 // DefaultCacheTTL is the cache TTL for resolved lookups.
-// Per HANDOFF §4 PR-3: "Redis cache TTL=24h".
-const DefaultCacheTTL = 24 * time.Hour
+//
+// Sprint 1 (HANDOFF §4 PR-3) shipped 24h. Sprint 3 (PR-23) tightens
+// it to 5 minutes because the BTK MNP feed and IP reverse DNS data
+// are now live — port events and ASN reallocations should surface
+// quickly. The 24h behaviour is still available via WithTTL on the
+// Service (and via the LongCacheTTL alias for explicit callers).
+const DefaultCacheTTL = 5 * time.Minute
+
+// LongCacheTTL is the historical Sprint-1 default (24h). Kept as an
+// exported alias so older callers/tests that explicitly want a long
+// TTL can spell the value at the call site instead of repeating
+// `24 * time.Hour`.
+const LongCacheTTL = 24 * time.Hour
 
 // MaxE164Length is the maximum total length of an E.164 phone number
 // (including the leading "+"). Per ITU-T E.164: max 15 digits, plus

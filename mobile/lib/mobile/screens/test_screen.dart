@@ -55,7 +55,12 @@ class _TestScreenState extends State<TestScreen> {
     try {
       final next = await _bridge.start();
       if (!mounted) return;
-      setState(() => _state = next);
+      setState(() => _state = next.state);
+    } on VpnPermissionDeniedError catch (e) {
+      if (!mounted) return;
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(content: Text('Permission denied: ${e.message}')),
+      );
     } finally {
       if (mounted) setState(() => _busy = false);
     }
@@ -67,7 +72,7 @@ class _TestScreenState extends State<TestScreen> {
     try {
       final next = await _bridge.stop();
       if (!mounted) return;
-      setState(() => _state = next);
+      setState(() => _state = next.state);
     } finally {
       if (mounted) setState(() => _busy = false);
     }

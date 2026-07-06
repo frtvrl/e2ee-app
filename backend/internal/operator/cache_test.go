@@ -256,24 +256,79 @@ func TestRedisCache_Delete(t *testing.T) {
 	}
 }
 
-func TestRedisCache_TTLDefaultsTo24h(t *testing.T) {
+func TestRedisCache_TTLDefaultsTo5Min(t *testing.T) {
+	// Sprint 3 (PR-23): operator cache TTL is 5m so live BTK MNP /
+	// IP reverse DNS updates surface quickly. Sprint 1 was 24h;
+	// LongCacheTTL preserves that for explicit callers.
+	//
+	// Disable RefreshOnHit so this test exercises pure eviction —
+	// otherwise the hit at 4m would reset the TTL and the entry
+	// would still be alive at 6m.
 	c, mr := newTestRedis(t)
 	rc, _ := NewRedisCache(c, nil, "opene2ee:operator")
+	rc.RefreshOnHit = false
 	ctx := context.Background()
 	key := rc.BuildKey(KeyKindPhone, "+905320000000")
-	// Pass a 0 TTL — must fall back to DefaultCacheTTL.
+	// Pass a 0 TTL — must fall back to DefaultCacheTTL (5m).
 	if err := rc.Set(ctx, key, &OperatorInfo{Operator: "x"}, 0); err != nil {
 		t.Fatalf("Set: %v", err)
 	}
 	// Just before expiry: still present.
-	mr.FastForward(23 * time.Hour)
+	mr.FastForward(4 * time.Minute)
 	if _, hit, _ := rc.Get(ctx, key); !hit {
-		t.Error("key evicted before 24h")
+		t.Error("key evicted before 5m")
 	}
 	// Just after expiry: gone.
+	mr.FastForward(2 * time.Minute) // total 6m
+	if _, hit, _ := rc.Get(ctx, key); hit {
+		t.Error("key still present after 6m; TTL did not default to 5m")
+	}
+}
+
+func TestRedisCache_LongTTLSurrogateUsed(t *testing.T) {
+	// Passing LongCacheTTL explicitly must give the historical
+	// 24h behaviour. This is the path older callers use when they
+	// don't want the new Sprint-3 default.
+	c, mr := newTestRedis(t)
+	rc, _ := NewRedisCache(c, nil, "opene2ee:operator")
+	rc.RefreshOnHit = false
+	ctx := context.Background()
+	key := rc.BuildKey(KeyKindPhone, "+905320000000")
+	if err := rc.Set(ctx, key, &OperatorInfo{Operator: "x"}, LongCacheTTL); err != nil {
+		t.Fatalf("Set: %v", err)
+	}
+	mr.FastForward(23 * time.Hour)
+	if _, hit, _ := rc.Get(ctx, key); !hit {
+		t.Error("LongCacheTTL evicted before 24h")
+	}
 	mr.FastForward(2 * time.Hour) // total 25h
 	if _, hit, _ := rc.Get(ctx, key); hit {
-		t.Error("key still present after 25h; TTL did not default to 24h")
+		t.Error("LongCacheTTL still present after 25h; expected eviction")
+	}
+}
+
+func TestRedisCache_RefreshOnHitExtendsTTL(t *testing.T) {
+	// Sprint 3 "TTL refresh" — a hit at 4m of a 5m entry should
+	// reset the TTL back to 5m, so the entry survives past the
+	// original 5m wall-clock.
+	c, mr := newTestRedis(t)
+	rc, _ := NewRedisCache(c, nil, "opene2ee:operator")
+	rc.RefreshOnHit = true // explicit for clarity
+	ctx := context.Background()
+	key := rc.BuildKey(KeyKindPhone, "+905320000000")
+	if err := rc.Set(ctx, key, &OperatorInfo{Operator: "x"}, 5*time.Minute); err != nil {
+		t.Fatalf("Set: %v", err)
+	}
+	mr.FastForward(4 * time.Minute)
+	if _, hit, _ := rc.Get(ctx, key); !hit {
+		t.Fatal("key evicted before 5m")
+	}
+	// At this point the TTL was refreshed on Get to 5m. Jump
+	// forward another 4m (total 8m wall-clock, but only 4m since
+	// the refresh) — the entry must still be alive.
+	mr.FastForward(4 * time.Minute)
+	if _, hit, _ := rc.Get(ctx, key); !hit {
+		t.Error("key evicted despite TTL refresh on hit")
 	}
 }
 

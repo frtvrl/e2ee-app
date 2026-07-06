@@ -42,6 +42,20 @@
 //                   so future Sprints can swap in a clustered hub
 //                   (Redis pub/sub) without breaking callers.
 //
+// Sprint 3 PR-21a adds a third pillar:
+//
+//   - WebRTC      — `webrtc.go`. A REST signalling layer with a
+//                   full WebRTC peer-connection state machine
+//                   (new → connecting → connected → closed/
+//                   failed), per-peer ICE candidate aggregation,
+//                   and STUN/TURN configuration loaded from env.
+//                   Endpoints live at /api/v1/webrtc/offer,
+//                   /answer, /ice, and /config (see the router
+//                   wiring in internal/api). Replaces the Sprint 2
+//                   Echo-Bot stub with real P2P signalling; the
+//                   underlying WebRTC handshake still happens
+//                   peer-to-peer at the network layer.
+//
 // RECEIVER METADATA
 //
 // Receivers don't just sit in a flat list — each one carries

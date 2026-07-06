@@ -49,11 +49,25 @@ $RECYCLE.BIN/
 !.vscode/extensions.json
 
 # IntelliJ / GoLand / Android Studio
+# Sprint 3 §9 — Native dev tooling:
+# Whitelist team-shared project-level Android Studio files (mobile/android/.idea/).
+# Pattern: negate only the team-shared subdirs/files inside .idea/.
+# User-specific files (workspace.xml, tasks.xml, caches/, etc.) remain ignored.
 .idea/
 *.iml
 *.ipr
 *.iws
 out/
+
+# Whitelisted Android Studio project-level files (Sprint 3 §9)
+# Scoped to mobile/android/ so backend GoLand .idea/ stays ignored.
+# Note: gitignore can't re-include a file if its parent directory is excluded,
+# so we must first re-include the parent .idea/ dir, then the subdirs / files.
+!mobile/android/.idea/
+!mobile/android/.idea/codeStyles/
+!mobile/android/.idea/inspectionProfiles/
+!mobile/android/.idea/runConfigurations/
+!mobile/android/.idea/.gitignore
 
 # Eclipse
 .bundle/

@@ -1,0 +1,86 @@
+## OpenE2EE — mobile/android — gitignore (combined from PR-22a Android VPN + Sprint 3 §9 native dev tooling)
+
+# Anything produced by `flutter pub get`, `flutter analyze`, the Android
+# Gradle Plugin, or `flutter build apk` should NOT be checked in. SPRINT-3
+# wires up only the source files (AndroidManifest.xml + Kotlin sources in
+# `app/src/main/kotlin/`); the full Gradle build config (gradle/, app/build.gradle,
+# settings.gradle, gradle-wrapper, etc.) is added in a follow-up PR.
+
+# Local machine config — points at the developer's Flutter SDK.
+local.properties
+
+# Gradle wrapper distribution / caches / wrapper jar (not yet committed).
+gradle/wrapper/gradle-wrapper.jar
+.gradle/
+.gradle
+**/build/
+app/build/
+captures/
+**/.cxx/
+
+# Flutter / Dart auto-generated plugin registration — regenerated on
+# every `flutter pub get` / `flutter analyze` / `flutter build`. Never
+# hand-edit. Kept out of git until the Gradle build is wired up.
+**/GeneratedPluginRegistrant.java
+**/GeneratedPluginRegistrant.kt
+.kotlin/
+
+# IDE caches inside android/
+.idea/
+.kotlin/
+
+# Keystores / signing material — never commit. Belt-and-braces; the
+# VpnService does NOT require signing for the sampling path.
+*.jks
+*.keystore
+
+# Native dev tooling (Sprint 3 §9)
+# Android Studio IDE folder (kept out; .idea/ at repo root handled separately)
+**/.idea/
+**/.idea/workspace.xml
+**/.idea/tasks.xml
+**/.idea/gradle.xml
+**/.idea/assetWizardSettings.xml
+**/.idea/dictionaries
+**/.idea/shelf
+**/.idea/libraries
+**/.idea/caches
+**/.idea/modules.xml
+**/.idea/navEditor.xml
+
+# Native build outputs
+.cxx/
+build/
+**/build/
+captures/
+.externalNativeBuild/
+.cxx/
+
+# Local config
+local.properties
+**/local.properties
+
+# Debug / release keystores
+*.jks
+*.keystore
+*.p12
+*.cer
+release.keystore
+debug.keystore
+
+# ProGuard mapping files (regenerated)
+**/*.mapping
+
+# Crashlytics / Firebase
+fabric.properties
+google-services.json
+
+# Fastlane
+fastlane/report.xml
+fastlane/screenshots
+fastlane/test_output
+fastlane/readme.md
+
+# Logs
+*.log
+*.hprof

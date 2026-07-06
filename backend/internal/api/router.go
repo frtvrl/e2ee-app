@@ -104,6 +104,12 @@ func (a *API) buildRouter() http.Handler {
 
 		// users (KVKK delete)
 		r.Delete("/users/{device_id_hash}", a.handleDeleteUser())
+
+		// webrtc signalling (Sprint 3 PR-21a)
+		r.Get("/webrtc/config", a.handleWebRTCConfig())
+		r.Post("/webrtc/offer", a.handleWebRTCOffer())
+		r.Post("/webrtc/answer", a.handleWebRTCAnswer())
+		r.Post("/webrtc/ice", a.handleWebRTCICE())
 	})
 
 	return r

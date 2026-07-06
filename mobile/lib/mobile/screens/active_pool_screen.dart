@@ -52,18 +52,27 @@ class _ActivePoolScreenState extends State<ActivePoolScreen> {
     if (value) {
       // Joining the pool requires the native sampler to be running so the
       // user can act as a receiver for inbound test requests.
-      final next = await _bridge.start();
-      if (!mounted) return;
-      setState(() {
-        _enrolled = next == VpnLifecycleState.sampling;
-        _state = next;
-      });
+      try {
+        final next = await _bridge.start();
+        if (!mounted) return;
+        setState(() {
+          _enrolled = next.state == VpnLifecycleState.sampling;
+          _state = next.state;
+        });
+      } on VpnPermissionDeniedError catch (_) {
+        if (!mounted) return;
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(
+            content: Text('VPN permission is required to join the pool'),
+          ),
+        );
+      }
     } else {
       final next = await _bridge.stop();
       if (!mounted) return;
       setState(() {
         _enrolled = false;
-        _state = next;
+        _state = next.state;
       });
     }
   }

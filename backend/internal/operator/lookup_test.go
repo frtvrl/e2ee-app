@@ -52,8 +52,14 @@ func TestSentinelErrors_AreDistinct(t *testing.T) {
 }
 
 func TestConstants_AreSane(t *testing.T) {
-	if DefaultCacheTTL != 24*time.Hour {
-		t.Fatalf("DefaultCacheTTL must be 24h per HANDOFF §4 PR-3, got %v", DefaultCacheTTL)
+	// Sprint 3 (PR-23): default cache TTL shortened from 24h to 5
+	// minutes because operator data is now live (BTK MNP + IP
+	// reverse DNS). LongCacheTTL remains the historical 24h.
+	if DefaultCacheTTL != 5*time.Minute {
+		t.Fatalf("DefaultCacheTTL must be 5m per Sprint 3 PR-23, got %v", DefaultCacheTTL)
+	}
+	if LongCacheTTL != 24*time.Hour {
+		t.Fatalf("LongCacheTTL must be 24h (Sprint 1 historical), got %v", LongCacheTTL)
 	}
 	if MinE164Length < 3 || MaxE164Length > 16 {
 		t.Fatalf("E.164 length bounds drifted: [%d,%d]", MinE164Length, MaxE164Length)
@@ -82,7 +88,8 @@ func TestQueryType_AllEnumsAreDistinct(t *testing.T) {
 func TestSource_AllEnumsAreDistinct(t *testing.T) {
 	all := []Source{
 		SourceTRMNPAPI, SourceRIPEWhois, SourceARINWhois,
-		SourceASNDB, SourceFallbackUnknown,
+		SourceASNDB, SourceBTKFeed, SourceRDAP,
+		SourceFallbackUnknown,
 	}
 	seen := map[Source]bool{}
 	for _, s := range all {

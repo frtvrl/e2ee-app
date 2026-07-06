@@ -12,8 +12,230 @@ env:
 
 jobs:
   # ============================================================================
-  # Backend (Go)
+  # Multi-OS matrix — Sprint 3 PR-MP-CI
+  # ----------------------------------------------------------------------------
+  # Per-OS coverage (ADR-0008 / SPRINT-3-SCOPE §5):
+  #   1. Go build + test         — 3 OSes (ubuntu + macos + windows)
+  #   2. Flutter analyze + test  — 3 OSes
+  #   3. Docker compose config   — 2 OSes (Linux + macOS; Windows skip —
+  #                                 bash anchors + POSIX secret paths)
+  #   4. Privacy spot-check      — 3 OSes (KVKK DELETE handler +
+  #                                 privacy invariant tests)
+  #
+  # Total matrix fan-out: 11 legs (3+3+2+3) per workflow run.
   # ============================================================================
+
+  go-build-test:
+    name: Go — vet + build + test (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest, windows-latest]
+    defaults:
+      run:
+        working-directory: backend
+    services:
+      postgres:
+        image: timescale/timescaledb-ha:pg16
+        env:
+          POSTGRES_USER: opene2ee_test
+          POSTGRES_PASSWORD: test
+          POSTGRES_DB: opene2ee_test
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd pg_isready
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+      redis:
+        image: redis:7-alpine
+        ports:
+          - 6379:6379
+        options: >-
+          --health-cmd "redis-cli ping"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+    env:
+      POSTGRES_HOST: localhost
+      POSTGRES_PORT: 5432
+      POSTGRES_USER: opene2ee_test
+      POSTGRES_PASSWORD: test
+      POSTGRES_DB: opene2ee_test
+      REDIS_HOST: localhost
+      REDIS_PORT: 6379
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: ${{ env.GO_VERSION }}
+          cache-dependency-path: backend/go.sum
+
+      - name: Cache Go modules
+        uses: actions/cache@v4
+        with:
+          path: ~/go/pkg/mod
+          key: ${{ runner.os }}-go-${{ hashFiles('backend/go.sum') }}
+
+      - name: Install deps
+        run: go mod download
+
+      - name: Wait for Postgres
+        shell: bash
+        run: |
+          for i in $(seq 1 30); do
+            if pg_isready -h localhost -p 5432; then
+              echo "postgres ready"
+              exit 0
+            fi
+            sleep 2
+          done
+          echo "postgres did not become ready"
+          exit 1
+
+      - name: go vet
+        run: go vet ./...
+
+      - name: go build
+        run: go build ./...
+
+      - name: go test
+        # No -race: cross-OS matrix is hermetic-friendly; -race is
+        # exercised by the legacy backend-test job on Linux. The
+        # matrix's job is to confirm the suite PASSES on all 3
+        # runners with the same source.
+        run: go test -count=1 ./...
+
+  flutter-analyze-test:
+    name: Flutter — analyze + test (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest, windows-latest]
+    defaults:
+      run:
+        working-directory: mobile
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Flutter
+        uses: subosito/flutter-action@v2
+        with:
+          flutter-version: ${{ env.FLUTTER_VERSION }}
+          channel: stable
+
+      - name: Cache pub
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.pub-cache
+            .dart_tool
+          key: ${{ runner.os }}-pub-${{ hashFiles('mobile/pubspec.lock') }}
+
+      - name: Install deps
+        run: flutter pub get
+
+      - name: Analyze
+        run: flutter analyze --fatal-infos
+
+      - name: Test
+        run: flutter test
+
+  docker-compose-config:
+    name: Docker compose config (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        # Windows intentionally skipped — infra/docker-compose.yml
+        # uses bash anchors (<<: *default-restart) and POSIX-style
+        # secret file paths (../.secrets/...) that don't translate.
+        # See SPRINT-3-SCOPE §5.
+        os: [ubuntu-latest, macos-latest]
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install PyYAML
+        run: pip install pyyaml
+
+      - name: Validate compose YAML
+        # infra/scripts/validate_compose.py is the project's
+        # pure-Python validator. It catches YAML syntax errors and
+        # structural shape issues (services, networks, volumes,
+        # secrets, depends_on, profiles) without requiring Docker.
+        # The script is OS-agnostic — runs identically on Linux
+        # and macOS. NOT equivalent to `docker compose config`
+        # (no env-var expansion, no anchor resolution), but
+        # sufficient as a CI gate.
+        run: python infra/scripts/validate_compose.py
+
+  privacy-check:
+    name: Privacy — KVKK DELETE spot-check (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest, windows-latest]
+    defaults:
+      run:
+        working-directory: backend
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: ${{ env.GO_VERSION }}
+          cache-dependency-path: backend/go.sum
+
+      - name: Install deps
+        run: go mod download
+
+      - name: KVKK DELETE + privacy invariants
+        # Focused hermetic test slice (no services required):
+        #   - TestRouter_AllRoutesMounted includes a DELETE
+        #     /api/v1/users/{hash} sub-test (router_test.go) that
+        #     exercises the KVKK right-to-erasure handler against
+        #     the in-process fake store and asserts the 200 +
+        #     {deleted:true, device_id_hash:<hash>} response shape.
+        #   - TestPrivacy_* guard rails in internal/auth
+        #     (device_test.go) assert no raw key material is
+        #     exported, no log leaks, hash/fingerprint are not
+        #     reversible. Together these are the cross-OS
+        #     spot-check that the KVKK privacy contract is
+        #     intact on every runner.
+        run: |
+          go test -v -count=1 \
+            -run 'TestRouter_AllRoutesMounted|TestPrivacy' \
+            ./internal/api/... ./internal/auth/...
+
+  # ============================================================================
+  # PR-14 single-OS jobs (preserved for backwards compatibility)
+  # ----------------------------------------------------------------------------
+  # The matrix above supersedes these on Linux for the same
+  # coverage. The single-OS jobs are kept so the Linux build
+  # continues to exercise the legacy per-step gates (gofmt, docker
+  # buildx, flutter build web, schema validation, markdown lint)
+  # at the same SHA, which the matrix does not duplicate.
+  # ============================================================================
+
+  # ---------------------------------------------------------------------------
+  # Backend (Go) — single-OS legacy
+  # ---------------------------------------------------------------------------
   backend-lint:
     name: Backend — go vet
     runs-on: ubuntu-latest
@@ -54,7 +276,7 @@ jobs:
           fi
 
   backend-test:
-    name: Backend — go test
+    name: Backend — go test (race + cover)
     runs-on: ubuntu-latest
     defaults:
       run:
@@ -140,9 +362,9 @@ jobs:
           cache-to: type=gha,mode=max
           load: true
 
-  # ============================================================================
-  # Mobile (Flutter)
-  # ============================================================================
+  # ---------------------------------------------------------------------------
+  # Mobile (Flutter) — single-OS legacy
+  # ---------------------------------------------------------------------------
   mobile-analyze:
     name: Mobile — flutter analyze
     runs-on: ubuntu-latest
@@ -245,9 +467,9 @@ jobs:
           path: mobile/build/web
           retention-days: 7
 
-  # ============================================================================
+  # ---------------------------------------------------------------------------
   # Schemas (JSON Schema validation)
-  # ============================================================================
+  # ---------------------------------------------------------------------------
   schemas-validate:
     name: Schemas — validate
     runs-on: ubuntu-latest
@@ -269,9 +491,9 @@ jobs:
             ajv compile -s "$schema" --spec=draft2020 || exit 1
           done
 
-  # ============================================================================
+  # ---------------------------------------------------------------------------
   # Docs (markdown lint)
-  # ============================================================================
+  # ---------------------------------------------------------------------------
   docs-lint:
     name: Docs — markdown lint
     runs-on: ubuntu-latest
