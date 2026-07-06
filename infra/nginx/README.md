@@ -16,9 +16,15 @@ Port 80 and 443 are exposed only when the Nginx profile is active. Kong's port 8
 
 ## SSL / Let's Encrypt
 
-Production uses certbot for Let's Encrypt certificates:
-- `certbot_data` volume mounts certs at `/etc/ssl/certs/` and `/etc/ssl/private/` inside the Nginx container
-- `certbot_www` volume serves HTTP-01 challenge files
+Production uses certbot for Let's Encrypt certificates.
+
+**Cert path convention** (must match across `docker-compose.yml`, `nginx.conf`, this README):
+- `certbot_data` volume is mounted at `/etc/letsencrypt:ro` inside the Nginx container (see `infra/docker-compose.yml`).
+- Certbot writes certs to `/etc/letsencrypt/live/<domain>/`, so `nginx.conf` references:
+  - `ssl_certificate /etc/letsencrypt/live/<domain>/fullchain.pem;`
+  - `ssl_certificate_key /etc/letsencrypt/live/<domain>/privkey.pem;`
+- Default `<domain>` is `opene2ee.local` (from `infra/.env.example` `DOMAIN`).
+- `certbot_www` volume serves HTTP-01 challenge files at `/var/www/certbot`.
 
 Certificate renewal: `docker compose run --rm certbot renew` (cron-driven, runs every 60 days).
 
