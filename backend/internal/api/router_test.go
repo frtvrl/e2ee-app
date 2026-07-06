@@ -87,7 +87,7 @@ func TestRouter_RejectsBadAPIVersion(t *testing.T) {
 func TestRouter_AllRoutesMounted(t *testing.T) {
 	ta := newTestAPI(t)
 	headers := withAPIHeaders(nil)
-	// Each route should respond with SOMETHING (even 405, 400) — the
+	// Each route should respond with SOMETHING (even 405, 400, 500) — the
 	// point is they are mounted, not 404 from chi's NotFoundHandler.
 	cases := []struct {
 		method string
@@ -99,6 +99,15 @@ func TestRouter_AllRoutesMounted(t *testing.T) {
 		{"GET", "/api/v1/matrix", http.StatusOK},
 		{"GET", "/api/v1/operator/lookup?qtype=phone_e164&q=%2B905321234567", http.StatusOK},
 		{"DELETE", "/api/v1/users/abcdef1234567890abcdef1234567890", http.StatusOK},
+		// webrtc/*: newTestAPI doesn't wire a matching.Manager —
+		// /config returns 500 (WebRTC is nil), POSTs return 500
+		// for the same reason. The route is mounted (not 404);
+		// see webrtc_test.go for the 200/400 paths with a fake
+		// WebRTC.
+		{"GET", "/api/v1/webrtc/config", http.StatusInternalServerError},
+		{"POST", "/api/v1/webrtc/offer", http.StatusInternalServerError},
+		{"POST", "/api/v1/webrtc/answer", http.StatusInternalServerError},
+		{"POST", "/api/v1/webrtc/ice", http.StatusInternalServerError},
 	}
 	for _, c := range cases {
 		t.Run(c.method+" "+c.path, func(t *testing.T) {

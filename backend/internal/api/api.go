@@ -28,6 +28,7 @@ import (
 	"time"
 
 	"github.com/google/uuid"
+	"github.com/opene2ee-com/e2ee-app/backend/internal/matching"
 	"github.com/opene2ee-com/e2ee-app/backend/internal/operator"
 	"github.com/opene2ee-com/e2ee-app/backend/internal/storage"
 )
@@ -133,6 +134,10 @@ type Config struct {
 	// 7-day SLA, and a transient Redis hiccup must not undo the
 	// right-to-erasure the user just exercised.
 	DeleteUserHook func(ctx context.Context, deviceIDHash string) error
+	// WebRTC is the matching.WebRTCManagerIface powering the
+	// /api/v1/webrtc/* endpoints (Sprint 3 PR-21a). If nil,
+	// the four endpoints 500 with "internal_error".
+	WebRTC matching.WebRTCManagerIface
 }
 
 // API is the wired handler. Hold a reference in main(), call

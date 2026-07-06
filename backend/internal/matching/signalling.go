@@ -22,16 +22,25 @@
 // WebRTC integration. The WebSocket bytes the two mobile apps
 // exchange through this Hub carry their own SDP/ICE content as
 // opaque base64 (see shared/schemas/p2p-signalling.schema.json).
-// Sprint 2 will introduce the actual SDP parser + ICE candidate
-// validator inside this handler — the Hub interface stays the
-// same so PR-7 (REST wiring) and the mobile apps don't break.
+// Sprint 2 introduced the actual SDP parser + ICE candidate
+// validator inside the Hub envelope — the Hub interface stays
+// the same so PR-7 (REST wiring) and the mobile apps don't break.
+//
+// Sprint 3 PR-21a added a parallel REST signalling channel
+// (`webrtc.go`) that handles the canonical "perfect negotiation"
+// WebRTC peer-connection state machine (new → connecting →
+// connected → closed/failed) and aggregates ICE candidates per
+// peer hash. The WebSocket channel remains for backward
+// compatibility with Sprint 1+2 mobile apps; new clients should
+// use the /api/v1/webrtc/{offer,answer,ice,config} endpoints.
 //
 // Rate limiting (RISKS §F25): a simple token-bucket per
 // session_id caps ICE-candidate bursts so a malicious peer can't
 // flood the signalling channel with candidates and exfiltrate the
 // peer-reflexive address via the relayed packets. SDP/answer
 // frames are not rate-limited (there's at most one of each per
-// session by definition).
+// session by definition). The REST handler in webrtc.go applies
+// a parallel sliding-window cap on candidates per peer (50).
 package matching
 
 import (
