@@ -1,6 +1,6 @@
 // mobile/lib/mobile/screens/test_screen.dart
 //
-// PR-10: Mobile-only — Test launch screen (UI skeleton).
+// PR-10 + PR-22b — Test launch screen (UI skeleton, calls real VPN bridge).
 //
 // Purpose (per HANDOFF §4.2 PR-10 + BRD §6.1)
 // -------------------------------------------
@@ -9,6 +9,11 @@
 // the "I want to start a test" button. The button hands off to the
 // native VPN sampler via `VpnBridge.start()` and waits for the first
 // telemetry callback before navigating to the result screen.
+//
+// PR-22b updates: `start()` / `stop()` now return `VpnStatusSnapshot`
+// instead of a raw `VpnLifecycleState`. The screen handles the
+// `VpnPermissionDeniedError` thrown when the user has not yet granted
+// VPN consent.
 //
 // Privacy contract (ADR-0006)
 // ---------------------------
@@ -27,10 +32,6 @@ import 'package:flutter/material.dart';
 import '../vpn/method_channel.dart';
 
 /// Test launch screen — entry point for a network diagnostic session.
-///
-/// This is a skeleton: empty Scaffold + AppBar + title + body placeholder.
-/// Phase 2 work (consent gate, task catalog: WhatsApp / RCS) is out of
-/// scope for Sprint 1.
 class TestScreen extends StatefulWidget {
   const TestScreen({super.key, VpnBridge? bridge})
       : _bridgeOverride = bridge;

@@ -1,0 +1,48 @@
+## iOS — generated files ##
+# Anything produced by `flutter pub get`, `flutter analyze`, Xcode, or
+# `flutter build ios` should NOT be checked in. SPRINT-3 wires up only the
+# source files (Info.plist, Runner.entitlements, AppDelegate.swift); the
+# full Xcode project config (Runner.xcodeproj/project.pbxproj,
+# Podfile/Podfile.lock, Flutter/Generated.xcconfig, etc.) is added in a
+# follow-up PR. Until then, this .gitignore keeps the per-machine +
+# generated noise out of git.
+
+# Local machine config
+*.mode1v3
+*.mode2v3
+*.moved-aside
+*.pbxuser
+*.perspectivev3
+**/*.xcuserstate
+
+# Generated build artifacts
+build/
+DerivedData/
+*.xcarchive
+
+# CocoaPods (not yet wired up)
+Pods/
+Podfile.lock
+
+# Flutter / Dart auto-generated plugin registration
+Flutter/Generated.xcconfig
+Flutter/Flutter.framework
+Flutter/Flutter.podspec
+Flutter/flutter_export_environment.sh
+Flutter/ephemeral/
+
+# App-specific generated content
+Flutter/App.framework
+Flutter/FlutterPluginRegistrant.*
+Runner/GeneratedPluginRegistrant.*
+
+# IDE caches inside ios/
+.idea/
+*.xcuserdatad/
+
+# Keystores / signing material
+*.p12
+*.cer
+*.mobileprovision
+*.cert
+*.key

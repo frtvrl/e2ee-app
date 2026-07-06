@@ -1,0 +1,117 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  mobile/ios/Runner/Info.plist
+
+  PR-22b (Sprint 3) — Info.plist for the OpenE2EE iOS Runner target.
+
+  Key entries
+  -----------
+  - `NSVPNUsageDescription` (required by Apple for any App or
+    NetworkExtension bundle that uses the Personal VPN framework): we
+    surface a fixed privacy-preserving description. Any future change
+    requires an ADR amendment (ADR-0003 risk A1).
+
+  - `UIBackgroundModes` includes `vpn` so the NetworkExtension target
+    can keep the tunnel alive while the host app is in the background.
+
+  - `LSApplicationCategoryType` is `public.app-category.utilities`.
+-->
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>CFBundleDevelopmentRegion</key>
+    <string>$(DEVELOPMENT_LANGUAGE)</string>
+    <key>CFBundleDisplayName</key>
+    <string>OpenE2EE</string>
+    <key>CFBundleExecutable</key>
+    <string>$(EXECUTABLE_NAME)</string>
+    <key>CFBundleIdentifier</key>
+    <string>$(PRODUCT_BUNDLE_IDENTIFIER)</string>
+    <key>CFBundleInfoDictionaryVersion</key>
+    <string>6.0</string>
+    <key>CFBundleName</key>
+    <string>opene2ee</string>
+    <key>CFBundlePackageType</key>
+    <string>APPL</string>
+    <key>CFBundleShortVersionString</key>
+    <string>$(FLUTTER_BUILD_NAME)</string>
+    <key>CFBundleSignature</key>
+    <string>????</string>
+    <key>CFBundleVersion</key>
+    <string>$(FLUTTER_BUILD_NUMBER)</string>
+    <key>LSRequiresIPhoneOS</key>
+    <true/>
+    <key>LSApplicationCategoryType</key>
+    <string>public.app-category.utilities</string>
+
+    <!--
+      Apple Privacy Manifest placeholder. The real PrivacyInfo.xcprivacy
+      is added in Sprint 4 alongside the `NSPrivacyAccessedAPITypes`
+      declarations required by WWDC 2023.
+    -->
+    <key>NSPrivacyAccessedAPITypes</key>
+    <array>
+        <dict>
+            <key>NSPrivacyAccessedAPIType</key>
+            <string>NSPrivacyAccessedAPICategoryUserDefaults</string>
+            <key>NSPrivacyAccessedAPITypeReasons</key>
+            <array>
+                <string>CA92.1</string>
+            </array>
+        </dict>
+    </array>
+    <key>NSPrivacyTracking</key>
+    <false/>
+
+    <!--
+      Personal VPN usage description — required by Apple for any app that
+      uses NetworkExtension / Personal VPN APIs. The wording is fixed by
+      this brief; any future change requires an ADR amendment.
+    -->
+    <key>NSVPNUsageDescription</key>
+    <string>OpenE2EE performs network diagnostics to evaluate encryption quality on your device. No content is read.</string>
+
+    <!--
+      Allow the Personal VPN to stay alive while the host app is in the
+      background. The NetworkExtension target's lifecycle drives the
+      actual packet loop.
+    -->
+    <key>UIBackgroundModes</key>
+    <array>
+        <string>vpn</string>
+    </array>
+
+    <!--
+      Minimum iOS version. NetworkExtension target support is iOS 14+,
+      per-app VPN (`NEAppRules`) is iOS 14+, and `NEAppRules.matchedURLs`
+      requires iOS 15+. We require iOS 14.
+    -->
+    <key>MinimumOSVersion</key>
+    <string>14.0</string>
+
+    <!--
+      Standard Flutter launch screen — retained for the Runner target.
+    -->
+    <key>UILaunchStoryboardName</key>
+    <string>LaunchScreen</string>
+    <key>UIMainStoryboardFile</key>
+    <string>Main</string>
+    <key>UISupportedInterfaceOrientations</key>
+    <array>
+        <string>UIInterfaceOrientationPortrait</string>
+        <string>UIInterfaceOrientationLandscapeLeft</string>
+        <string>UIInterfaceOrientationLandscapeRight</string>
+    </array>
+    <key>UISupportedInterfaceOrientations~ipad</key>
+    <array>
+        <string>UIInterfaceOrientationPortrait</string>
+        <string>UIInterfaceOrientationPortraitUpsideDown</string>
+        <string>UIInterfaceOrientationLandscapeLeft</string>
+        <string>UIInterfaceOrientationLandscapeRight</string>
+    </array>
+    <key>CADisableMinimumFrameDurationOnPhone</key>
+    <true/>
+    <key>UIApplicationSupportsIndirectInputEvents</key>
+    <true/>
+</dict>
+</plist>
