@@ -19,6 +19,7 @@
 #   pwsh -File scripts/build-web.ps1
 #   pwsh -File scripts/build-web.ps1 -Release
 #   pwsh -File scripts/build-web.ps1 -Release -Renderer canvaskit
+#   pwsh -File scripts/build-web.ps1 -Check           # CI: verify entry exists, don't build
 #
 # Equivalent to: make build-web  (cross-platform Make target)
 
@@ -28,7 +29,10 @@ param(
     [switch]$Release,
 
     # --web-renderer <canvaskit|html|wasm>. Default: omitted (flutter default).
-    [string]$Renderer
+    [string]$Renderer,
+
+    # CI preflight: verify target entry file exists + flutter on PATH, but skip the build.
+    [switch]$Check
 )
 
 $ErrorActionPreference = 'Stop'
@@ -48,7 +52,7 @@ if (-not (Test-Path $MobileDir)) {
 
 if (-not (Test-Path $TargetDart)) {
     Write-Host ''
-    Write-Host "ERROR: Flutter web entry not found at expected path:" -ForegroundColor Red
+    Write-Host 'ERROR: Flutter web entry not found at expected path:' -ForegroundColor Red
     Write-Host "    $TargetDart"
     Write-Host ''
     Write-Host 'Why this happens:' -ForegroundColor Yellow
@@ -57,10 +61,16 @@ if (-not (Test-Path $TargetDart)) {
     Write-Host '  `flutter build web` targets mobile/lib/main.dart (the future'
     Write-Host '  mobile entry point, not yet in this checkout).'
     Write-Host ''
-    Write-Host 'Fix one of:' -ForegroundColor Yellow
-    Write-Host '  - Restore mobile/lib/web/main.dart (the canonical web entry).'
-    Write-Host '  - Or update the --target=<path> flag in this wrapper if you'
-    Write-Host '    intentionally moved the web entry.'
+    Write-Host 'How to fix (run from repo root):' -ForegroundColor Yellow
+    Write-Host '  1. Restore the canonical web entry:'
+    Write-Host '       git checkout -- mobile/lib/web/main.dart'
+    Write-Host '  2. If the entry is missing because the Flutter package is uninitialised:'
+    Write-Host '       cd mobile'
+    Write-Host '       flutter create .            # creates web/ + lib/'
+    Write-Host '       flutter pub get              # restore deps'
+    Write-Host '       git checkout -- mobile/lib/web/main.dart   # restore web entry'
+    Write-Host '  3. If you intentionally moved the web entry, update the'
+    Write-Host '     --target=<path> flag in this wrapper (see line ~92).'
     Write-Host ''
     exit 1
 }
@@ -78,8 +88,17 @@ if ($Release)  { $flutterArgs += '--release' }
 if ($Renderer) { $flutterArgs += @('--web-renderer', $Renderer) }
 
 # --- Header: Sprint 4 PR-27 context ----------------------------------------
+if ($Check) {
+    Write-Host '==> OpenE2EE Flutter web build (PR-27 wrapper) - -Check (CI preflight)'
+    Write-Host '    entry:   mobile/lib/web/main.dart (non-standard; see CONTRIBUTING.md)'
+    Write-Host '    OK:      target file exists, flutter on PATH.'
+    Write-Host ''
+    Write-Host '==> Check passed. Skipping build (omit -Check to actually build).'
+    exit 0
+}
+
 Write-Host '==> OpenE2EE Flutter web build (PR-27 wrapper)'
-Write-Host '    entry:   mobile/lib/web/main.dart (non-standard; see CONTRIBTING.md)'
+Write-Host '    entry:   mobile/lib/web/main.dart (non-standard; see CONTRIBUTING.md)'
 Write-Host "    args:     flutter $($flutterArgs -join ' ')"
 Write-Host '    output:  mobile/build/web'
 Write-Host ''
