@@ -69,10 +69,13 @@ const (
 //
 // Semantics:
 //   - Set writes info under key with the given TTL. A zero or
-//     negative TTL is treated as "use the default" (24h per
-//     HANDOFF §4 PR-3).
+//     negative TTL is treated as "use the default" (5m per
+//     Sprint 3 PR-23; 24h is preserved as LongCacheTTL).
 //   - Get returns (info, true, nil) on a hit, (nil, false, nil) on
-//     a miss, or (nil, false, err) on a Redis / I/O error.
+//     a miss, or (nil, false, err) on a Redis / I/O error. When
+//     RefreshOnHit is enabled (default), Get also PEXPIRES the
+//     key back to the original TTL on every hit so a hot key
+//     stays hot — see RefreshOnHit on RedisCache.
 //   - Delete removes the key. Missing keys are NOT an error —
 //     Delete is idempotent.
 //   - Close releases any underlying resources. Idempotent.
@@ -116,10 +119,22 @@ func (NoopCache) Close() error { return nil }
 //
 // It owns the *redis.Client; callers that also need the client for
 // health checks should hold a separate reference.
+//
+// RefreshOnHit (Sprint 3 PR-23) controls the sliding-window refresh
+// behaviour: when true (default), every Get that returns a hit
+// re-issues a PEXPIRE so the entry's TTL is reset to the original
+// value it was Set with. This keeps hot keys hot — an identity
+// that's queried every 30s stays in cache indefinitely — while
+// cold entries still evict on the original TTL.
+//
+// The original TTL is NOT remembered per-key; it is remembered on
+// the OperatorInfo struct (info.CacheTTLSecs, set by Service.Set)
+// or, when that is zero, defaults to DefaultCacheTTL.
 type RedisCache struct {
-	client  *redis.Client
-	keySalt []byte
-	prefix  string
+	client       *redis.Client
+	keySalt      []byte
+	prefix       string
+	RefreshOnHit bool
 }
 
 // NewRedisCache wraps an already-connected *redis.Client. The caller
@@ -141,9 +156,10 @@ func NewRedisCache(client *redis.Client, keySalt []byte, prefix string) (*RedisC
 		return nil, errors.New("operator: NewRedisCache: empty prefix")
 	}
 	return &RedisCache{
-		client:  client,
-		keySalt: append([]byte(nil), keySalt...), // copy so caller can mutate
-		prefix:  prefix,
+		client:       client,
+		keySalt:      append([]byte(nil), keySalt...), // copy so caller can mutate
+		prefix:       prefix,
+		RefreshOnHit: true,
 	}, nil
 }
 
@@ -189,7 +205,11 @@ func (NoopCache) BuildKey(kind KeyKind, value string) string {
 const cacheKeyHashBytes = 16
 
 // Set writes info as JSON under key with the given TTL. Zero /
-// negative TTL falls back to DefaultCacheTTL (24h).
+// negative TTL falls back to DefaultCacheTTL (5m as of Sprint 3).
+// The info's CacheTTLSecs is also stamped so a later Get with
+// RefreshOnHit=true can re-issue PEXPIRE with the SAME TTL value
+// the entry was originally written with (rather than the global
+// default), which is what "TTL refresh" means in practice.
 func (c *RedisCache) Set(ctx context.Context, key string, info *OperatorInfo, ttl time.Duration) error {
 	if key == "" {
 		return errors.New("operator: RedisCache.Set: empty key")
@@ -200,6 +220,8 @@ func (c *RedisCache) Set(ctx context.Context, key string, info *OperatorInfo, tt
 	if ttl <= 0 {
 		ttl = DefaultCacheTTL
 	}
+	// Stamp the TTL onto the OperatorInfo so Get/Refresh can use it.
+	info.CacheTTLSecs = int(ttl / time.Second)
 	payload, err := json.Marshal(info)
 	if err != nil {
 		return fmt.Errorf("operator: RedisCache.Set: marshal: %w", err)
@@ -215,6 +237,13 @@ func (c *RedisCache) Set(ctx context.Context, key string, info *OperatorInfo, tt
 // failure is treated as a miss + log, NOT an error — the cache
 // may hold a value from an older schema version and we don't want
 // one bad row to take down the lookup service.
+//
+// When RefreshOnHit is true (default) AND the hit carries a
+// non-zero CacheTTLSecs, Get re-issues PEXPIRE so the entry's TTL
+// is reset to its original value. This is the Sprint 3 "TTL
+// refresh" behaviour — hot keys stay hot while cold keys still
+// evict. The PEXPIRE error is intentionally swallowed: a hit is
+// a hit, regardless of whether the refresh succeeded.
 func (c *RedisCache) Get(ctx context.Context, key string) (*OperatorInfo, bool, error) {
 	if key == "" {
 		return nil, false, errors.New("operator: RedisCache.Get: empty key")
@@ -230,6 +259,12 @@ func (c *RedisCache) Get(ctx context.Context, key string) (*OperatorInfo, bool, 
 	if err := json.Unmarshal(raw, &info); err != nil {
 		// Treat bad payload as miss — see doc comment.
 		return nil, false, nil
+	}
+	// TTL refresh on hit. Best-effort: a PEXPIRE failure must not
+	// downgrade the response to an error.
+	if c.RefreshOnHit && info.CacheTTLSecs > 0 {
+		_ = c.client.PExpire(ctx, key,
+			time.Duration(info.CacheTTLSecs)*time.Second).Err()
 	}
 	return &info, true, nil
 }

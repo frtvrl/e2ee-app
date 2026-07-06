@@ -22,13 +22,18 @@ func TestNewService_RejectsNilCache(t *testing.T) {
 	}
 }
 
-func TestNewService_DefaultsTTLTo24h(t *testing.T) {
+func TestNewService_DefaultsTTLCacheTTL(t *testing.T) {
+	// Sprint 3 (PR-23): default cache TTL is 5m, down from
+	// Sprint-1's 24h. Service default mirrors DefaultCacheTTL.
 	s, err := NewService(NoopCache{}, nil, nil)
 	if err != nil {
 		t.Fatalf("NewService: %v", err)
 	}
 	if s.ttl != DefaultCacheTTL {
 		t.Errorf("ttl = %v, want %v", s.ttl, DefaultCacheTTL)
+	}
+	if s.ttl != 5*time.Minute {
+		t.Errorf("default TTL = %v, want 5m (Sprint 3 PR-23)", s.ttl)
 	}
 }
 

@@ -1,32 +1,43 @@
 // ip_reverse.go — IP reverse-lookup adapter for the Operator Tespit
 // Servisi.
 //
-// Per HANDOFF §4 PR-3, this adapter answers "which carrier does this
-// IP belong to?" by combining two sources:
+// Per HANDOFF §4 PR-3 + Sprint 3 PR-23, this adapter answers "which
+// carrier does this IP belong to?" by combining four sources in
+// priority order:
 //
-//  1. A local ASN database (CIDR ranges → operator) — always
-//     available, fast, no network. The MVP-only source.
-//  2. Symbolic RIPE/ARIN whois calls — wired as a no-op closure in
-//     this PR; Sprint 2 swaps in real HTTP. The interface is stable
-//     so the orchestrator (Service) and the cache layer don't need
-//     to change.
+//  1. RDAP (Registration Data Access Protocol) — the IETF standard
+//     HTTP-based replacement for whois. Authoritative for the
+//     registry that allocates the IP block (RIPE for Europe /
+//     Middle East, ARIN for North America, APNIC for Asia-Pacific,
+//     AFRINIC for Africa, LACNIC for Latin America). Sprint 3
+//     wires this up as the PRIMARY live source.
+//
+//  2. Whois — the legacy port-43 protocol. Still authoritative for
+//     some registries (e.g. RIPE for historical allocations) and
+//     used as a FALLBACK when RDAP is unavailable.
+//
+//  3. A local ASN database (CIDR ranges → operator) — always
+//     available, fast, no network. Acts as the FALLBACK when both
+//     RDAP and whois are unreachable, or for development where the
+//     adapter is used offline.
+//
+//  4. "unknown" — when none of the above know the answer.
 //
 // SCOPE:
-//   - IPv4 only in the local table. IPv6 is accepted at the API
-//     surface but every entry currently returns "unknown" — the
-//     IPv6 BGP feeds we'd need are out of MVP scope (HANDOFF §9).
+//   - IPv4 first-class in the RDAP + whois paths. IPv6 is accepted
+//     at the API surface (RDAP supports it natively; whois via the
+//     same registries); entries with no match return "unknown".
 //   - Private / loopback addresses (RFC 1918, 127.0.0.0/8, ::1) are
-//     NOT in the table and fall through to "unknown" with confidence
-//     0.0 — they should never appear on a real telemetry row anyway.
-//   - Confidence 0.80: ASN-level mapping is coarse. A real whois
-//     response (Sprint 2) will bump this.
+//     rejected by RDAP/whois servers; the local table also has no
+//     entry, so they fall through to "unknown" with confidence 0.0.
+//     They should never appear on a real telemetry row anyway.
+//   - Confidence 0.95 (RDAP/whois), 0.80 (ASN table).
 //
-// POST-MVP (Sprint 2+):
-//   - Wire up RIPE REST API for /ip/194.9.0.0/16 style queries.
-//   - Add an offline ASN database file (e.g. ip2asn combined snapshot,
-//     updated weekly).
-//   - Add a 30-day TTL on the whois cache entry (vs 24h for the phone
-//     table — whois assignments move much more slowly).
+// POST-MVP (Sprint 4+):
+//   - Add ASN-specific feeds (RIPE STATIC, APNIC delegated stats).
+//     ASN lookup is DEFERRED per Sprint 3 scope (PR-23 task).
+//   - Add an offline ASN database file (e.g. ip2asn combined
+//     snapshot, updated weekly).
 package operator
 
 import (
@@ -96,36 +107,98 @@ func mustPrefix(s string) netip.Prefix {
 
 // IPReverseAdapter implements OperatorLookup for IP addresses.
 //
-// whoisLookup is an injected dependency — the default is a no-op
-// closure (no network call in MVP). Tests can pass a stub to assert
-// the orchestrator wired the whois call correctly when the local
-// table misses.
+// Lookup order:
+//   1. Local ASN table (most specific CIDR wins).
+//   2. RDAP — registry HTTP, authoritative.
+//   3. Whois — port-43, fallback for registries that don't expose
+//      RDAP for legacy allocations.
+//   4. ErrUnknownOperator → orchestrator will return "unknown".
+//
+// All lookups honour ctx.Done() — a stalled RDAP request or a TCP
+// timeout in whois is bounded by the per-call timeout passed to the
+// constructor (default 5s).
+//
+// The HTTP and whois clients are injected so tests can substitute
+// httptest.Server-backed clients; in production the defaults are
+// used (RDAP bootstraps via https://rdap.org/, whois uses the
+// per-RIR servers).
+//
+// whoisFn is the Sprint-1 backwards-compat path: when set (by
+// NewIPReverseAdapterWithWhois), it takes precedence over the
+// WhoisClient. This preserves the Sprint-1 test API without
+// pulling the closure shape into the new WhoisClient.Lookup path.
 type IPReverseAdapter struct {
-	now        func() time.Time
-	whoisLookup func(ctx context.Context, ip netip.Addr) (*OperatorInfo, error)
+	now     func() time.Time
+	rdap    *RDAPClient
+	whois   *WhoisClient
+	whoisFn func(ctx context.Context, ip netip.Addr) (*OperatorInfo, error)
+	timeout time.Duration
 }
 
-// NewIPReverseAdapter returns the default adapter: local table only,
-// no whois. This is the production setup for MVP.
+// NewIPReverseAdapter returns the default adapter: local ASN table
+// only, no network. This matches the Sprint-1 default and is what
+// unit tests + offline-development environments use.
+//
+// For the production live-network behavior (RDAP + whois against
+// the public RIRs), call NewIPReverseAdapterLive.
 func NewIPReverseAdapter() *IPReverseAdapter {
 	return &IPReverseAdapter{
-		now: time.Now,
-		// Default whois is a no-op: it returns ErrUnknownOperator so
-		// the orchestrator knows the local table also missed and we
-		// have nothing to say. Sprint 2 replaces this body.
-		whoisLookup: func(_ context.Context, _ netip.Addr) (*OperatorInfo, error) {
-			return nil, ErrUnknownOperator
-		},
+		now:     time.Now,
+		rdap:    nil,
+		whois:   nil,
+		timeout: 5 * time.Second,
 	}
 }
 
-// NewIPReverseAdapterWithWhois lets callers (mainly tests) inject a
-// custom whois function. The local table is always consulted first;
-// the whois function is only called on a miss.
+// NewIPReverseAdapterLive returns an adapter that performs real
+// RDAP + whois lookups against the public RIR endpoints, with the
+// local ASN table consulted first. Use this in production
+// deployments where egress to rdap.org / whois.ripe.net is allowed.
+func NewIPReverseAdapterLive() *IPReverseAdapter {
+	rdap, _ := NewRDAPClient(RDAPConfig{
+		BootstrapURL: defaultRDAPBootstrap,
+		HTTPTimeout:  5 * time.Second,
+	})
+	whois, _ := NewWhoisClient(WhoisConfig{
+		Timeout:    5 * time.Second,
+		ServerByCC: defaultWhoisServers,
+	})
+	return &IPReverseAdapter{
+		now:     time.Now,
+		rdap:    rdap,
+		whois:   whois,
+		timeout: 5 * time.Second,
+	}
+}
+
+// NewIPReverseAdapterWithDeps lets callers (mainly tests) inject
+// custom RDAP + whois clients. The local table is always consulted
+// first; the injected clients are only called on a miss. nil values
+// for either client are accepted and disable that lookup path
+// (e.g. nil rdap → skip RDAP, whois-only).
+func NewIPReverseAdapterWithDeps(rdap *RDAPClient, whois *WhoisClient) *IPReverseAdapter {
+	a := NewIPReverseAdapter()
+	if rdap != nil {
+		a.rdap = rdap
+	}
+	if whois != nil {
+		a.whois = whois
+	}
+	return a
+}
+
+// NewIPReverseAdapterWithWhois is the Sprint-1 backwards-compat
+// constructor preserved verbatim. It wires a closure-style whois
+// function into the adapter (no RDAP). Existing Sprint-1 tests
+// call this constructor and continue to work.
+//
+// When whoisFn is non-nil, LookupByIP short-circuits to it
+// instead of consulting the WhoisClient — see the lookup body.
 func NewIPReverseAdapterWithWhois(fn func(ctx context.Context, ip netip.Addr) (*OperatorInfo, error)) *IPReverseAdapter {
 	a := NewIPReverseAdapter()
+	a.rdap = nil
 	if fn != nil {
-		a.whoisLookup = fn
+		a.whoisFn = fn
 	}
 	return a
 }
@@ -156,8 +229,13 @@ func (a *IPReverseAdapter) LookupByPhone(_ context.Context, e164 string) (*Opera
 
 // LookupByIP resolves an IP string to an OperatorInfo. Lookup order:
 //   1. Local ASN table (most specific CIDR wins).
-//   2. Injected whoisLookup closure (no-op in MVP).
-//   3. ErrUnknownOperator → orchestrator will return an "unknown" info.
+//   2. RDAP HTTP lookup against the appropriate RIR.
+//   3. Whois (port 43) fallback against the appropriate RIR.
+//   4. ErrUnknownOperator → orchestrator will return an "unknown" info.
+//
+// Any non-ErrUnknownOperator error from RDAP/whois is propagated,
+// NOT masked as "unknown" — a real network outage is operator-
+// visible and should not look like a clean "we don't know" answer.
 func (a *IPReverseAdapter) LookupByIP(ctx context.Context, ip string) (*OperatorInfo, error) {
 	if !looksLikeIP(ip) {
 		return nil, fmt.Errorf("ip %q: %w", ip, ErrInvalidInput)
@@ -172,7 +250,7 @@ func (a *IPReverseAdapter) LookupByIP(ctx context.Context, ip string) (*Operator
 		return nil, fmt.Errorf("ip %q: %w", ip, ErrInvalidInput)
 	}
 
-	// (1) Local ASN table.
+	// (1) Local ASN table — fast path, no network.
 	for _, e := range asnTableSorted {
 		if e.CIDR.Contains(addr) {
 			qt := QueryIPv4
@@ -191,20 +269,20 @@ func (a *IPReverseAdapter) LookupByIP(ctx context.Context, ip string) (*Operator
 				Confidence:   0.80,
 				Timestamp:    a.now().UTC(),
 			}
-			// PRIVACY (ADR-0006): apply MaskIP before returning. The
-			// raw IP MUST NEVER land in cache or response.
 			applyIPMask(info, ip)
 			return info, nil
 		}
 	}
 
-	// (2) Injected whois closure.
-	if a.whoisLookup != nil {
-		info, err := a.whoisLookup(ctx, addr)
+	// Bound the network calls so a stalled registry cannot pin
+	// the request goroutine.
+	callCtx, cancel := context.WithTimeout(ctx, a.timeout)
+	defer cancel()
+
+	// (2) RDAP. Authoritative; preferred over whois.
+	if a.rdap != nil {
+		info, err := a.rdap.Lookup(callCtx, addr)
 		if err == nil && info != nil {
-			// Override the query value with the MASKED form (the
-			// whois closure may have set the raw IP). Apply masking
-			// even if the closure already masked — idempotent.
 			if info.QueryValue == "" {
 				applyIPMask(info, ip)
 			} else {
@@ -215,15 +293,49 @@ func (a *IPReverseAdapter) LookupByIP(ctx context.Context, ip string) (*Operator
 			}
 			return info, nil
 		}
-		// If whois returns ErrUnknownOperator, fall through to the
-		// "unknown" result below. Any other error is propagated.
 		if err != nil && !errors.Is(err, ErrUnknownOperator) {
 			return nil, err
 		}
 	}
 
-	// (3) No source could resolve — the orchestrator will turn this
-	// into an "unknown" OperatorInfo with source=fallback_unknown.
+	// (3) Whois fallback. Same error semantics as RDAP. The
+	// whoisFn path (Sprint-1 backwards-compat) takes precedence
+	// over the WhoisClient when both are set.
+	if a.whoisFn != nil {
+		info, err := a.whoisFn(callCtx, addr)
+		if err == nil && info != nil {
+			if info.QueryValue == "" {
+				applyIPMask(info, ip)
+			} else {
+				applyIPMask(info, info.QueryValue)
+			}
+			if info.Timestamp.IsZero() {
+				info.Timestamp = a.now().UTC()
+			}
+			return info, nil
+		}
+		if err != nil && !errors.Is(err, ErrUnknownOperator) {
+			return nil, err
+		}
+	} else if a.whois != nil {
+		info, err := a.whois.Lookup(callCtx, addr)
+		if err == nil && info != nil {
+			if info.QueryValue == "" {
+				applyIPMask(info, ip)
+			} else {
+				applyIPMask(info, info.QueryValue)
+			}
+			if info.Timestamp.IsZero() {
+				info.Timestamp = a.now().UTC()
+			}
+			return info, nil
+		}
+		if err != nil && !errors.Is(err, ErrUnknownOperator) {
+			return nil, err
+		}
+	}
+
+	// (4) No source could resolve.
 	return nil, fmt.Errorf("ip %q: %w", ip, ErrUnknownOperator)
 }
 
