@@ -1,14 +1,14 @@
-// mobile/lib/mobile/vpn/vpn_service_android.kt
+// mobile/android/app/src/main/kotlin/com/opene2ee/opene2ee/vpn/OpenE2eeVpnService.kt
 //
 // PR-22a (Sprint 3) — Android VPN Service — REAL implementation.
+// PR-24 (Sprint 4) — moved from `mobile/lib/mobile/vpn/vpn_service_android.kt`
+//                    into the Android source tree so Gradle compiles it.
 //
 // This file is the canonical Kotlin source for the OpenE2EE Android VPN
-// service. Architecturally the file lives under `mobile/lib/mobile/vpn/`
-// (sibling to `NetworkExtension.swift`) for single-source-tree review.
-// When the full Gradle build for `mobile/android/` is wired up, this file
-// is referenced (or moved) into:
-//
-//     mobile/android/app/src/main/kotlin/com/opene2ee/opene2ee/vpn/OpenE2eeVpnService.kt
+// service. It lives under `mobile/android/app/src/main/kotlin/` so the
+// Android Gradle Plugin picks it up on `./gradlew assembleDebug`. The
+// sibling iOS source remains under `mobile/lib/mobile/vpn/NetworkExtension.swift`
+// for cross-platform review.
 //
 // Architecture
 // ------------
