@@ -1,0 +1,36 @@
+_format_version: "3.0"
+services:
+  - name: e2ee-backend
+    url: http://backend:8080
+    routes:
+      - name: api-v1
+        paths:
+          - /api/v1
+        methods:
+          - GET
+          - POST
+          - DELETE
+    plugins:
+      - name: rate-limiting
+        config:
+          minute: 60
+          hour: 1000
+          policy: local
+      - name: cors
+        config:
+          origins:
+            - "*"
+          methods:
+            - GET
+            - POST
+            - DELETE
+          headers:
+            - Content-Type
+            - Authorization
+            - X-Request-ID
+      - name: bot-detection
+        config:
+          allow:
+            - "curl"
+            - "wget"
+            - "OpenE2EE/*"
