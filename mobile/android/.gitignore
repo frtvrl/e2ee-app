@@ -1,10 +1,10 @@
-## Android — generated files ##
+## OpenE2EE — mobile/android — gitignore (combined from PR-22a Android VPN + Sprint 3 §9 native dev tooling)
+
 # Anything produced by `flutter pub get`, `flutter analyze`, the Android
 # Gradle Plugin, or `flutter build apk` should NOT be checked in. SPRINT-3
 # wires up only the source files (AndroidManifest.xml + Kotlin sources in
 # `app/src/main/kotlin/`); the full Gradle build config (gradle/, app/build.gradle,
-# settings.gradle, gradle-wrapper, etc.) is added in a follow-up PR. Until
-# then, this .gitignore keeps the per-machine + generated noise out of git.
+# settings.gradle, gradle-wrapper, etc.) is added in a follow-up PR.
 
 # Local machine config — points at the developer's Flutter SDK.
 local.properties
@@ -33,3 +33,54 @@ captures/
 # VpnService does NOT require signing for the sampling path.
 *.jks
 *.keystore
+
+# Native dev tooling (Sprint 3 §9)
+# Android Studio IDE folder (kept out; .idea/ at repo root handled separately)
+**/.idea/
+**/.idea/workspace.xml
+**/.idea/tasks.xml
+**/.idea/gradle.xml
+**/.idea/assetWizardSettings.xml
+**/.idea/dictionaries
+**/.idea/shelf
+**/.idea/libraries
+**/.idea/caches
+**/.idea/modules.xml
+**/.idea/navEditor.xml
+
+# Native build outputs
+.cxx/
+build/
+**/build/
+captures/
+.externalNativeBuild/
+.cxx/
+
+# Local config
+local.properties
+**/local.properties
+
+# Debug / release keystores
+*.jks
+*.keystore
+*.p12
+*.cer
+release.keystore
+debug.keystore
+
+# ProGuard mapping files (regenerated)
+**/*.mapping
+
+# Crashlytics / Firebase
+fabric.properties
+google-services.json
+
+# Fastlane
+fastlane/report.xml
+fastlane/screenshots
+fastlane/test_output
+fastlane/readme.md
+
+# Logs
+*.log
+*.hprof
