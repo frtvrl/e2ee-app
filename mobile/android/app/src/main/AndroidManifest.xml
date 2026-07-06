@@ -1,0 +1,114 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  PR-22a (Sprint 3) — Android Manifest for the OpenE2EE Android app.
+
+  This Manifest declares:
+    - INTERNET + ACCESS_NETWORK_STATE: required to reach the backend
+      over the protected network for telemetry uploads.
+    - FOREGROUND_SERVICE: required to run the VPN Service in the
+      background while in a sampling session.
+    - FOREGROUND_SERVICE_SPECIAL_USE: Android 14+ (API 34) requirement
+      for VPN services not classified as "system" — see
+      docs/ADR-0003-vpn-layer.md risk B2.
+    - POST_NOTIFICATIONS: Android 13+ (API 33) runtime permission
+      required to show the foreground-service notification.
+    - The OpenE2eeVpnService entry with foregroundServiceType=specialUse
+      and BIND_VPN_SERVICE permission so the system can hand us a TUN.
+    - The MainActivity entry that owns the VpnService.prepare() /
+      onActivityResult(RESULT_OK) handshake.
+
+  Privacy note: we deliberately do NOT request READ_PHONE_STATE,
+  READ_PRIVILEGED_PHONE_STATE, READ_PHONE_NUMBERS, BLUETOOTH_CONNECT,
+  or any other device-identifier permission. Per docs/ADR-0006 these
+  identifiers are forbidden.
+-->
+<manifest xmlns:android="http://schemas.android.com/apk/res/android"
+          package="com.opene2ee.opene2ee">
+
+    <uses-permission android:name="android.permission.INTERNET" />
+    <uses-permission android:name="android.permission.ACCESS_NETWORK_STATE" />
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE_SPECIAL_USE" />
+
+    <!--
+      Android 13+ (API 33) requires this runtime permission to show the
+      foreground-service notification tied to the VPN sampling session.
+      Declared with usesPermissionFlags="neverForLocation" because we do
+      not derive any location from the notification interaction.
+    -->
+    <uses-permission android:name="android.permission.POST_NOTIFICATIONS"
+        android:usesPermissionFlags="neverForLocation" />
+
+    <application
+        android:label="OpenE2EE"
+        android:name="${applicationName}"
+        android:icon="@mipmap/ic_launcher"
+        android:enableOnBackInvokedCallback="true">
+
+        <!--
+          MainActivity — owns the VPN permission handshake
+          (startActivityForResult → VpnService.prepare() → RESULT_OK).
+          LaunchMode is singleTop so subsequent MethodChannel invocations
+          re-use the existing instance instead of stacking new ones.
+        -->
+        <activity
+            android:name=".MainActivity"
+            android:exported="true"
+            android:launchMode="singleTop"
+            android:taskAffinity=""
+            android:theme="@style/LaunchTheme"
+            android:configChanges="orientation|keyboardHidden|keyboard|screenSize|smallestScreenSize|locale|layoutDirection|fontScale|screenLayout|density|uiMode"
+            android:hardwareAccelerated="true"
+            android:windowSoftInputMode="adjustResize">
+            <meta-data
+                android:name="io.flutter.embedding.android.NormalTheme"
+                android:resource="@style/NormalTheme" />
+            <intent-filter>
+                <action android:name="android.intent.action.MAIN" />
+                <category android:name="android.intent.category.LAUNCHER" />
+            </intent-filter>
+        </activity>
+
+        <!--
+          OpenE2eeVpnService — the Android VpnService implementation.
+
+          android:permission="android.permission.BIND_VPN_SERVICE" restricts
+          who can bind to this service to the system (so only the OS VPN
+          framework can deliver a TUN descriptor). android:exported="true"
+          is required for the VPN framework to bind to us.
+
+          android:foregroundServiceType="specialUse" is the Android 14+
+          requirement for VPN services that don't fall under the system
+          category. The <property> tag explains the special use case.
+        -->
+        <service
+            android:name="com.opene2ee.opene2ee.vpn.OpenE2eeVpnService"
+            android:exported="true"
+            android:permission="android.permission.BIND_VPN_SERVICE"
+            android:foregroundServiceType="specialUse">
+            <property
+                android:name="android.app.PROPERTY_SPECIAL_USE_FGS_SUBTYPE"
+                android:value="network_diagnostic_sampling_for_e2ee_proof" />
+            <intent-filter>
+                <action
+                    android:name="android.net.VpnService"
+                    android:permission="android.permission.BIND_VPN_SERVICE" />
+            </intent-filter>
+        </service>
+
+        <meta-data
+            android:name="flutterEmbedding"
+            android:value="2" />
+    </application>
+
+    <!--
+      Flutter's VpnService.prepare() intent — emitted by MainActivity when
+      the user opts in. We declare the queries so Android 11+ package
+      visibility rules let us call startActivity with the prepare intent.
+    -->
+    <queries>
+        <intent>
+            <action android:name="android.net.VpnService" />
+        </intent>
+    </queries>
+</manifest>
