@@ -120,9 +120,12 @@ out/
 # Test binary & output
 *.test
 *.out
+*.cov
+*.cover
 coverage.out
 coverage.html
 coverage.xml
+$covFile
 
 # Vendoring (canonical Go ignore — go mod vendor kullanılmıyorsa)
 vendor/
