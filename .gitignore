@@ -23,7 +23,6 @@ Desktop.ini
 $RECYCLE.BIN/
 *.lnk
 *.url
-*.lnk
 [Dd]esktop.ini
 
 # ─────────────────────────────────────────────────────────────
@@ -39,6 +38,15 @@ $RECYCLE.BIN/
 # ─────────────────────────────────────────────────────────────
 # Visual Studio (NOT VSCode — farklı araç, farklı klasör)
 .vs/
+
+# VSCode — ignore everything except team-tracked config (PR-MP-6)
+# Syntax: .vscode/* matches files inside; negation re-includes specific files.
+# .vscode/ (directory-only) yerine .vscode/* kullanıldı → negation semantics reliable
+# (deeper dirs'da bile: matched files are explicitly re-included).
+# user-specific auto-generated dosyalar (argv.json, .browse.VC.db, vb.) ignored kalır.
+.vscode/*
+!.vscode/settings.json
+!.vscode/extensions.json
 
 # IntelliJ / GoLand / Android Studio
 .idea/
