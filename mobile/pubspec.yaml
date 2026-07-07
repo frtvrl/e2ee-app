@@ -52,13 +52,19 @@ dependencies:
   fl_chart: ^0.69.2
 
   # PR-21b: WebRTC plugin — Sprint 3 Flutter side of the PR-21a Go
-  # signaling surface. Pinned to ^0.10.x: that release is the last
-  # where the public API used by `lib/shared/webrtc_client.dart`
-  # (RTCPeerConnection factories, RTCDataChannel.{send with
-  # RTCDataChannelMessage / RTCDataChannelMessage.fromBinary})
-  # matches the contract tests below; 1.x rebases on
-  # flutter_webrtc 1.5.0+ (Sprint 4 follow-up).
-  flutter_webrtc: ^0.10.8
+  # signaling surface. Bumped to ^1.5.x in Sprint 7 (MOB-14/SCA-10):
+  # ^0.10.8 ships libwebrtc m104 which has known transitive CVEs in
+  # libwebrtc's bundled components (SCA-10). 1.5.2 (Jun 2026) ships
+  # libwebrtc m144.7559.09 + WebRTC-SDK 144.7559.09 (Android/Darwin),
+  # closing the dependency CVE chain. The Dart-side API surface
+  # consumed by `lib/shared/webrtc_client.dart`
+  # (RTCPeerConnection.createPeerConnection/{createOffer,createAnswer,
+  # setLocalDescription,setRemoteDescription,addCandidate,close},
+  # RTCIceCandidate, RTCSessionDescription, RTCDataChannel /
+  # RTCDataChannelInit, RTCDataChannelMessage(text|binary), and
+  # RTCPeerConnectionState enum) is unchanged between 0.10.8 and
+  # 1.5.2 — see notes/ADR pinned at Sprint 7 PR-41.
+  flutter_webrtc: ^1.5.2
 
 dev_dependencies:
   flutter_test:
