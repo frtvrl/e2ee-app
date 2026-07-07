@@ -13,10 +13,9 @@
 //   - Applies the Kotlin Android plugin (lets Gradle compile the
 //     `mobile/android/app/src/main/kotlin/com/opene2ee/opene2ee/**/*.kt`
 //     sources — including `vpn/OpenE2eeVpnService.kt`).
-//   - Pins minSdk = 21 (Lollipop, the floor for `VpnService.Builder
-//     .allowedApplications()` and `.disallowedApplications()` per the
-//     PR-22a follow-up in PR-28 §B.1), targetSdk = 34 (Android 14,
-//     required for `foregroundServiceType="specialUse"`), compileSdk = 34.
+//   - Pins minSdk = 23 (Android 6.0 Marshmallow) — see SPRINT-7 §MOB-5
+//     rationale block below. targetSdk = 34 (Android 14, required for
+//     `foregroundServiceType="specialUse"`), compileSdk = 34.
 //   - Declares runtime deps: AndroidX core, AndroidX annotation (for
 //     `@RequiresApi` lint enforcement), androidx.core (ServiceCompat),
 //     kotlinx-coroutines-android (used by future async plumbing).
@@ -26,11 +25,57 @@
 //     Release is empty unless the developer drops a keystore at
 //     `mobile/android/key.properties` (gitignored).
 //
+// ─── SPRINT-7 §MOB-5 — minSdk = 23 rationale (Android 6.0 Marshmallow)
+// ───────────────────────────────────────────────────────────────────
+// History: PR-22a / PR-28 set minSdk = 21 (Lollipop) because that was
+// the floor for `VpnService.Builder.allowedApplications()` and
+// `.disallowedApplications()`. MOB-5 (cyber-security hand-off) found
+// this floor was BELOW the floor that flutter_secure_storage 9.x
+// requires for AndroidKeyStore-backed encryption:
+//
+//   • flutter_secure_storage 9.2.4 (pinned in pubspec.yaml) documents:
+//       "API Level: Android 6.0 (API 23) minimum for basic encryption"
+//     https://pub.dev/packages/flutter_secure_storage  (Requirements)
+//   • flutter_secure_storage 9.x changelog records:
+//       "Minimum Android SDK changed from 19 to 23"
+//   • `android.security.keystore.KeyGenParameterSpec` (the modern
+//     AndroidKeyStore key-generation builder — supports PURPOSE_*,
+//     BLOCK_MODE_*, ENCRYPTION_PADDING_*, user-auth requirements,
+//     randomized-encryption flag) was added in API 23.
+//     Pre-API-23 only had `KeyPairGeneratorSpec`, which lacks every
+//     one of those controls. flutter_secure_storage's AES master key
+//     cannot be created on API < 23 without falling back to software-
+//     only SharedPreferences — which would silently break the Ed25519
+//     private-key-at-rest guarantee that ADR-0006 §B1 relies on.
+//
+// Decision: bump minSdk from 21 → 23. This is preferred over
+// "attestation" (Option B in the Sprint 7 spec) because the API
+// literally does not exist on API < 23 — there is nothing to
+// attest to. It is preferred over "explicit failure at runtime"
+// (Option C) because end-users on Android 5.x would see a crash
+// with no recourse; refusing to install is more honest.
+//
+// VPN impact: `VpnService.Builder.allowedApplications()` is API 21+,
+// so VPN functionality is preserved unchanged. The `@RequiresApi(21)`
+// annotations on OpenE2eeVpnService.kt are now belt-and-braces
+// (the floor enforces it) but kept as defensive documentation.
+//
+// Market-share note (2026): Android 5.0-5.1.1 < 0.5% of active
+// devices per Google Play Console public dashboards. Acceptable
+// drop for a security-critical E2EE app.
+//
+// Regression guard: mobile/test/min_sdk_posture_test.dart parses this
+// file and asserts minSdk >= 23. Update the test constant if the
+// floor ever moves.
+//
 // References:
 //   - https://docs.flutter.dev/deployment/android
 //   - https://developer.android.com/build/building-cmdline
+//   - https://developer.android.com/reference/android/security/keystore/KeyGenParameterSpec
+//   - https://pub.dev/packages/flutter_secure_storage
 //   - docs/ADR-0003-vpn-layer.md
-//   - docs/SPRINT-5-SCOPE.md §PR-28
+//   - docs/ADR-0006-anonimlik.md (Ed25519 private-key-at-rest contract)
+//   - docs/SPRINT-7-SCOPE.md §Item 6 MOB-5
 
 plugins {
     id("com.android.application")
@@ -57,12 +102,22 @@ android {
     }
 
     defaultConfig {
-        // Floor — API 21 (Lollipop) — required for
-        // `VpnService.Builder.allowedApplications()` /
-        // `disallowedApplications()`. See OpenE2eeVpnService.kt for the
-        // `@RequiresApi(21)` annotations that the PR-28 follow-up batch
-        // adds around those call sites.
-        minSdk = 21
+        // Floor — API 23 (Android 6.0 Marshmallow) — see the SPRINT-7
+        // §MOB-5 rationale block at the top of this file. The two
+        // hard requirements that pin this floor are:
+        //   (1) `android.security.keystore.KeyGenParameterSpec` (the
+        //       AndroidKeyStore key-generation builder used by
+        //       flutter_secure_storage's AES master key) is API 23+.
+        //   (2) flutter_secure_storage 9.2.4 explicitly documents
+        //       "Android 6.0 (API 23) minimum for basic encryption".
+        // VPN functionality is preserved: `VpnService.Builder
+        // .allowedApplications()` / `.disallowedApplications()` are
+        // API 21+, so the per-app VPN features OpenE2eeVpnService.kt
+        // ships still work. The `@RequiresApi(21)` annotations in
+        // OpenE2eeVpnService.kt are now defensive (the floor enforces
+        // it) but kept for documentation.
+        // Regression guard: mobile/test/min_sdk_posture_test.dart.
+        minSdk = 23
         targetSdk = 34
         versionCode = 1
         versionName = "0.1.0"

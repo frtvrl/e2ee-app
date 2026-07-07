@@ -37,7 +37,7 @@ flutter create --platforms=android,ios --org com.opene2ee --project-name opene2e
 |---|---|---|
 | **JDK** | 17 (LTS) | Android Studio Hedgehog+ JDK 17 ile gelir; ayrıca kurulum gerekmez |
 | **Android Studio** | Hedgehog (2023.1.1) veya üstü | <https://developer.android.com/studio> |
-| **Android SDK** | API 34 (target) + API 21 (minSdk) | Flutter Android gereksinimi |
+| **Android SDK** | API 34 (target) + API 23 (minSdk) | Flutter Android gereksinimi + Sprint 7 §MOB-5 AndroidKeyStore floor |
 | **Flutter SDK** | ≥ 3.24 (Dart ≥ 3.5) | `mobile/pubspec.yaml` ile uyumlu |
 | **Android Studio Plugin: Flutter** | Son sürüm | Settings → Plugins → "Flutter" → Install |
 | **Android Studio Plugin: Dart** | Son sürüm | Flutter plugin'i ile birlikte gelir |

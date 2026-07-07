@@ -332,12 +332,15 @@ class OpenE2eeVpnService : VpnService() {
      * Marked `protected` so tests can swap it via subclass.
      *
      * PR-28 §B.1: `allowedApplications` and `disallowedApplications` are
-     * API 21 (Lollipop) additions. The project pins `minSdk = 21` in
-     * `app/build.gradle.kts`, so the `@RequiresApi(21)` annotations below
-     * are belt-and-braces — they document the API contract and stop the
-     * Android Lint `NewApi` rule from firing if a downstream module ever
-     * lowers minSdk. The calls themselves are safe because `app/build
-     * .gradle.kts` enforces the floor.
+     * API 21 (Lollipop) additions. Sprint 7 MOB-5 bumped the project floor
+     * to `minSdk = 23` (Android 6.0 Marshmallow) in `app/build.gradle.kts`
+     * to satisfy flutter_secure_storage 9.x's AndroidKeyStore contract —
+     * so the `@RequiresApi(21)` annotations below are now belt-and-braces.
+     * They document the API contract and stop the Android Lint `NewApi`
+     * rule from firing if a downstream module ever lowers minSdk below 21.
+     * The calls themselves are safe because `app/build.gradle.kts`
+     * enforces the floor (currently 23; never below 21 since these two
+     * methods are the original API 21 floor reference).
      */
     @RequiresApi(21)
     protected open fun buildVpnBuilder(): VpnService.Builder {
