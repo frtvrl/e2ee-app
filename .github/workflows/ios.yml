@@ -1,0 +1,245 @@
+name: ios-build
+
+# ============================================================================
+# Sprint 7 STRIDE-8-01 (hand-off from cyber-security)
+# ----------------------------------------------------------------------------
+# PR-39 (Sprint 6) was static-only validated: Info.plist + AndroidManifest
+# patches, no xcodebuild invocation. The actual iOS build was never
+# exercised in CI before this matrix was added — leaving a gap where a
+# pure-Xcode regression could ship undetected. Closes STRIDE-8-01.
+#
+# Per-OS coverage (each runner focused on what it CAN build):
+#   * macos-latest   — full xcodebuild build + xcodebuild test
+#                       (iOS Simulator, Debug config, no signing)
+#   * ubuntu-latest  — static checks (Podfile Ruby syntax + XML plists)
+#   * windows-latest — static checks (Podfile Ruby syntax + XML plists)
+#
+# xcodebuild is Darwin-only. Non-macOS legs fail-fast no-ops the
+# xcodebuild steps via `if: matrix.os == 'macos-latest'` and instead
+# run cross-platform static validation. Both surface paths are
+# OS-agnostic except where flagged.
+#
+# Caching: macOS restores `~/Library/Caches/org.swift.swiftpm` (managed
+# SwiftPM cache, Darwin-only path) and `mobile/ios/Pods` (CocoaPods
+# install output). Restore uses exact match on Podfile.lock /
+# Package.resolved with a `restore-keys` fallback to the looser prefix
+# match. Hit/miss is logged in a dedicated step.
+#
+# Push YAPILMADI — branch-only hand-off to verifier.
+# ============================================================================
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+env:
+  FLUTTER_VERSION: "3.44.1"
+
+jobs:
+  ios-build:
+    name: iOS — build + test (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        # Three runners — each does what it CAN build. macOS does the
+        # real xcodebuild leg; the others run static cross-platform
+        # validation in lieu of an actual build. See the per-step
+        # `if:` guards below.
+        os: [windows-latest, macos-latest, ubuntu-latest]
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Flutter
+        uses: subosito/flutter-action@v2
+        with:
+          flutter-version: ${{ env.FLUTTER_VERSION }}
+          channel: stable
+
+      - name: Cache pub
+        # Cross-OS pub-cache (same pattern as the matrix in ci.yml):
+        # ~/.pub-cache is the Flutter package cache, .dart_tool holds
+        # the per-package build artifacts. Runs on all 3 legs.
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.pub-cache
+            .dart_tool
+          key: ${{ runner.os }}-pub-${{ hashFiles('mobile/pubspec.lock') }}
+
+      - name: Install Flutter deps
+        # `flutter pub get` writes `mobile/ios/Flutter/Generated.xcconfig`
+        # which the Podfile requires before `pod install` can succeed.
+        # This MUST run before pod install on macOS, and before any
+        # iOS lint on the other legs.
+        working-directory: mobile
+        run: flutter pub get
+
+      # ---------------------------------------------------------------------
+      # macOS-only caching — SwiftPM managed cache + CocoaPods install dir.
+      # `~/Library/Caches/org.swift.swiftpm` is a Darwin path (the SwiftPM
+      # managed cache lives there on macOS only); guarding on
+      # matrix.os == 'macos-latest' avoids spurious "path not found"
+      # diagnostics on Linux/Windows runners.
+      # ---------------------------------------------------------------------
+
+      - name: Restore SwiftPM + CocoaPods cache
+        id: ios-cache
+        if: matrix.os == 'macos-latest'
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/Library/Caches/org.swift.swiftpm
+            mobile/ios/Pods
+          key: ${{ runner.os }}-swiftpm-pods-${{ hashFiles('mobile/ios/Podfile.lock', '**/Package.resolved') }}
+          # Fallback to a looser prefix match when an exact key (built
+          # from Podfile.lock / Package.resolved hashes) is missing.
+          # Useful when Podfile.lock is regenerated locally without
+          # changing the dependency set.
+          restore-keys: |
+            ${{ runner.os }}-swiftpm-pods-
+
+      - name: Log SwiftPM + Pods cache hit/miss
+        if: matrix.os == 'macos-latest'
+        # Read the cache step's hit / primary-key / restored-key outputs.
+        # `cache-hit` is true only on an EXACT key match; `cache-matched-key`
+        # records whether restore-keys found a fallback.
+        run: |
+          echo "::group::iOS macOS cache hit/miss log"
+          echo "Requested key:        ${{ steps.ios-cache.key }}"
+          echo "Cache primary key:    ${{ steps.ios-cache.cache-primary-key }}"
+          echo "Cache restored key:   ${{ steps.ios-cache.cache-restored-key }}"
+          echo "Cache exact hit:      ${{ steps.ios-cache.cache-hit }}"
+          if [ -d "$HOME/Library/Caches/org.swift.swiftpm" ]; then
+            echo "swiftpm cache:  HIT  ($(du -sh "$HOME/Library/Caches/org.swift.swiftpm" 2>/dev/null | cut -f1))"
+          else
+            echo "swiftpm cache:  MISS — first build will populate it"
+          fi
+          if [ -d "mobile/ios/Pods" ]; then
+            echo "Pods cache:     HIT  ($(du -sh "mobile/ios/Pods" 2>/dev/null | cut -f1))"
+          else
+            echo "Pods cache:     MISS — pod install will populate it"
+          fi
+          echo "::endgroup::"
+
+      # ---------------------------------------------------------------------
+      # xcodebuild path — macOS only.
+      # - `if: matrix.os == 'macos-latest'` gates the entire step.
+      # - `continue-on-error: false` (GitHub Actions default, but spelled
+      #   out for cyber-security/verifier clarity): any xcodebuild
+      #   failure fails the workflow.
+      # - `CODE_SIGNING_*` are required because GitHub-hosted macOS
+      #   runners have no signing identity. Building for Simulator
+      #   so we don't need device certs.
+      # ---------------------------------------------------------------------
+
+      - name: CocoaPods install (macOS only)
+        if: matrix.os == 'macos-latest'
+        working-directory: mobile/ios
+        continue-on-error: false
+        run: |
+          set -o pipefail
+          pod install
+
+      - name: Save SwiftPM + CocoaPods cache (post-install)
+        # Save AFTER pod install so the cache captures freshly
+        # resolved Pods even on a cache miss. `always()` so a
+        # subsequent build failure still preserves the cache for
+        # the next run.
+        if: matrix.os == 'macos-latest' && always()
+        uses: actions/cache/save@v4
+        with:
+          path: |
+            ~/Library/Caches/org.swift.swiftpm
+            mobile/ios/Pods
+          key: ${{ runner.os }}-swiftpm-pods-${{ hashFiles('mobile/ios/Podfile.lock', '**/Package.resolved') }}
+
+      - name: xcodebuild build + test (macOS only)
+        if: matrix.os == 'macos-latest'
+        working-directory: mobile/ios
+        continue-on-error: false
+        # Use `set -o pipefail` so `xcodebuild ... | xcpretty` (or any
+        # piped post-processor) failing the parse still surfaces as an
+        # error.
+        run: |
+          set -o pipefail
+          xcodebuild \
+            -workspace Runner.xcworkspace \
+            -scheme Runner \
+            -configuration Debug \
+            -sdk iphonesimulator \
+            -destination 'generic/platform=iOS Simulator' \
+            CODE_SIGNING_ALLOWED=NO \
+            CODE_SIGNING_REQUIRED=NO \
+            CODE_SIGN_IDENTITY="" \
+            build test
+
+      # ---------------------------------------------------------------------
+      # Static validation — Linux + Windows legs.
+      # xcodebuild is Darwin-only, but there IS cross-platform static
+      # validation we can do. Failing here surfaces project.pbxproj /
+      # Podfile / Info.plist regressions on PRs without needing a
+      # Mac runner (which is the bottleneck runner in the GHA quota).
+      # ---------------------------------------------------------------------
+
+      - name: Static iOS sanity (non-macOS)
+        if: matrix.os != 'macos-latest'
+        working-directory: mobile/ios
+        run: |
+          set -e
+          echo "::group::Static iOS sanity (no xcodebuild — non-Darwin runner)"
+
+          # Podfile Ruby syntax — works wherever ruby is on PATH.
+          # GitHub-hosted ubuntu/windows runners ship ruby.
+          if command -v ruby >/dev/null 2>&1; then
+            ruby -c Podfile
+          else
+            echo "WARN: ruby not on PATH, skipping Podfile syntax check"
+          fi
+
+          # All .plist files EXCEPT project.pbxproj — plistlib
+          # handles XML and binary plist. project.pbxproj is
+          # NeXTSTEP ASCII plist (an Apple format) which plistlib
+          # can't parse; treat it as a separate text sanity check.
+          python - <<'PY'
+          import glob, plistlib, sys
+          failures = []
+          for p in sorted(glob.glob('**/*.plist', recursive=True)):
+              try:
+                  with open(p, 'rb') as f:
+                      d = plistlib.load(f)
+                  keys_preview = ','.join(sorted(d.keys())[:6])
+                  print(f'{p}: OK ({keys_preview}...)')
+              except Exception as e:
+                  if 'Runner.xcodeproj' in p:
+                      print(f'{p}: SKIP (NeXTSTEP ASCII plist, plistlib not supported)')
+                      continue
+                  print(f'ERROR: {p}: {e}', file=sys.stderr)
+                  failures.append((p, str(e)))
+          if failures:
+              sys.exit(1)
+          PY
+
+          # project.pbxproj is NeXTSTEP ASCII plist — text-only
+          # sanity. Check for the structural anchors.
+          python - <<'PY'
+          import sys
+          p = 'Runner.xcodeproj/project.pbxproj'
+          with open(p, encoding='utf-8') as f:
+              content = f.read()
+          if 'PBXProject' not in content:
+              print(f'ERROR: {p} missing PBXProject root anchor', file=sys.stderr)
+              sys.exit(1)
+          if 'objects' not in content:
+              print(f'ERROR: {p} missing objects section', file=sys.stderr)
+              sys.exit(1)
+          if 'archiveVersion' not in content:
+              print(f'WARN: {p} missing archiveVersion (Apple Xcodeproj format drift?)')
+          print(f'{p}: OK (PBXProject + objects anchors present)')
+          PY
+
+          echo "::endgroup::"
