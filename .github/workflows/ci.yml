@@ -635,6 +635,51 @@ jobs:
           retention-days: 7
 
   # ---------------------------------------------------------------------------
+  # Mobile (Flutter) — F1 anonimlik grep guard (Sprint 7 / Item 12)
+  # ---------------------------------------------------------------------------
+  # Hand-off origin: cyber-security review of PR-39 mobile security
+  # hardening (Sprint 6) — the F1 anonimlik contract documented in
+  # ADR-0006 §"Veri Minimizasyonu" requires that the mobile lib/test
+  # source never re-introduces reads from `TelephonyManager`,
+  # `getDeviceId`, IMEI, or `androidId`. PR-15 closed the immediate
+  # violation; this CI job is the standing guard that prevents
+  # regression.
+  #
+  # Why a dedicated Dart script (`tool/ci_grep_privacy_violations.dart`)
+  # rather than `grep -rnE`:
+  #   * Dart / Kotlin / Swift source needs Dart-aware stripping of
+  #     comments and string literals so that the policy documentation
+  #     (e.g. the RegExp in `mobile/test/shared/device_identity_test.dart`
+  #     lines 245-249) does not trip the guard.
+  #   * The script's output (`F1 anonimlik guard: IMEI/TelephonyManager
+  #     usage detected — see ADR-0006`) is a deterministic, machine-
+  #     parseable failure message that points reviewers at the right
+  #     ADR on first failure.
+  #
+  # Ubuntu-only is intentional: the script depends only on the Dart
+  # stdlib (`dart:io`, `dart:core`), which the Flutter setup action
+  # provides on every runner. A matrix would not catch additional
+  # bugs and would 3x the wall-clock cost.
+  mobile-privacy-grep:
+    name: Mobile — F1 anonimlik grep guard
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Flutter (for dart on PATH)
+        uses: subosito/flutter-action@v2
+        with:
+          flutter-version: ${{ env.FLUTTER_VERSION }}
+          channel: stable
+
+      - name: Run privacy violations grep guard
+        # Sprint 7 / Item 12 (STRIDE-3-01) — F1 anonimlik CI guard.
+        # Defaults scan `mobile/lib` and `mobile/test`. Exits non-zero
+        # on ANY forbidden identifier surviving the comment / string-
+        # literal strip, blocking the PR per ADR-0006.
+        run: dart run tool/ci_grep_privacy_violations.dart
+
+  # ---------------------------------------------------------------------------
   # Schemas (JSON Schema validation)
   # ---------------------------------------------------------------------------
   schemas-validate:
