@@ -155,35 +155,46 @@ server to be deleted.
 
 ---
 
-## Risk Register (A1–G1)
+## Risk Register (A1–G1, plus E3)
 
-The privacy contract in §Decision is exposed to seven named risks. Each
-is enumerated with the affected §Decision principle, the threat, and the
-documented mitigation. Risks are tracked in `docs/RISK-REGISTER.md`
-(Sprint 5 follow-up; full likelihood/impact/owner columns) and
-revisited every Sprint.
+The privacy contract in §Decision is exposed to seven named risks
+(A1–G1) plus the E3 AUTHZ-1 long-term follow-up. Each is enumerated
+with the affected §Decision principle, the threat, and the documented
+mitigation. The register currently lives in this ADR (Risk Register
+section below); the full likelihood / impact / owner / review-cadence
+columns are a Sprint 5+ follow-up that will land in
+`docs/RISK-REGISTER.md` when the register graduates beyond this
+ADR's scope.
 
 | ID  | Affected principle      | Risk                                                                                  | Mitigation (status)                                                                                                       |
 |-----|-------------------------|---------------------------------------------------------------------------------------|---------------------------------------------------------------------------------------------------------------------------|
 | A1  | Veri Minimizasyonu (§5) | UUID v7 timestamp bits are predictable → server can re-derive install time from `device_id_hash` | Server-side timestamp mask: hash includes `server_salt` (§Backend'de Saklanan); raw UUID never crosses the device boundary. |
 | B1  | Anonim Cihaz Kimliği    | Ed25519 private key extraction from app sandbox (rooted device, memory dump)         | Private key lives in Android Keystore / iOS Keychain via `flutter_secure_storage`; access gated on `Keychain accessGroup` + Secure Enclave on A-series chips (PR-29 §B). |
-| C1  | Backend'de Saklanan     | `server_salt` rotation → all `device_id_hash` values change → session join breakage  | Dual-salt transition window: new + old salt accepted for N days; KVKK audit log records both. Re-hash job runs async.       |
-| D1  | Anonim Cihaz Kimliği    | SHA-256(publicKey)[:16] fingerprint collision across distinct devices                  | Truncation `[:16]` (32 hex chars) is a 64-bit space — acceptable collision rate per `TestPublicKeyFingerprint_Distribution`; full 32-byte fp logged for backend join. |
+| C1  | Backend'de Saklanan     | `server_salt` rotation → all `device_id_hash` values change → session join breakage  | Dual-salt transition window: new + old salt accepted for N days; slog warn-log records both salts; re-hash job runs async.       |
+| D1  | Anonim Cihaz Kimliği    | SHA-256(publicKey)[:16] fingerprint collision across distinct devices                  | Truncation `[:16]` (32 hex chars) is a 64-bit space — acceptable uniqueness verified by `TestPublicKeyFingerprint_UniquePerKey` (asserts distinct keys → distinct fingerprints); full 32-byte fp logged for backend join. |
 | E1  | KVKK / GDPR (§5)        | Data retention beyond legally permitted window                                        | Default 6-month retention; configurable via `STORAGE_RETENTION_DAYS`; KVKK DELETE handler wipes `devices` + `telemetry` rows. |
+| E3  | KVKK / GDPR (§5)        | AUTHZ-1 cross-device gate alone is necessary-but-not-sufficient once a real `users` table ships — the handler must additionally confirm the device row is still active. | Sprint 8+ follow-up: when the `users` table lands, extend `handleDeleteUser` (`backend/internal/api/users.go` L81-98) with a row-active check before `DeleteUser`, and add a regression test (`TestDeleteUser_DeviceRowInactive_403`) to `backend/internal/api/users_test.go`. Tracked here so the scope of the follow-up PR is explicit. |
 | F1  | Anonim Cihaz Kimliği    | Cross-platform UUID byte order (mobile Go-side vs backend) yields divergent hashes    | Explicit big-endian (`uuid.UUID` in `google/uuid` is big-endian by spec); `TestHashDeviceID_KnownAnswer` pins the input order `uuid || salt`. |
-| G1  | Right to erasure (§5)   | Async propagation of KVKK DELETE to Redis cache + downstream consumers                | Best-effort DELETE with audit log (`kvkk_delete_audit` table); Redis TTL bounds staleness (24h max); consumer retry-with-jitter up to 7 days. |
+| G1  | Right to erasure (§5)   | Async propagation of KVKK DELETE to Redis cache + downstream consumers                | Best-effort DELETE with slog warn-log (`users.go` L92-95 logs `delete-user cross-device attempt blocked` etc.); periodic Redis-pool sweep via `RunSweeper` + `SweepIdle` (`backend/internal/matching/pool.go` L482-491, L508-522) bounds Redis staleness at 15m max (`DefaultPoolTTL = 15 * time.Minute`); KVKK 7-day SLA upheld by sweeper. |
 
 > **Status legend.** Mitigations marked *(active)* are in production
 > today. Mitigations marked *(planned)* are Sprint 5+ follow-ups.
-> *Active*: A1, B1, D1, E1, F1. *Planned*: C1, G1.
+> *Active*: A1, B1, D1, E1, F1. *Planned*: C1, G1, E3.
+> E3 numbering follows the legacy `RISKS.md` external reference
+> (cited from `backend/internal/storage/interfaces.go` L90: "Per
+> RISKS.md E3 + BRD §8 FR-7: 7-day SLA for user-initiated delete");
+> the local A1–G1 sequence is preserved untouched.
 
 ### Follow-ups
-* Move this register into `docs/RISK-REGISTER.md` with full Risk
-  Register columns (likelihood, impact, owner, review cadence).
+* Lift this register into `docs/RISK-REGISTER.md` with full Risk
+  Register columns (likelihood, impact, owner, review cadence) when
+  it grows beyond seven risks.
 * Wire each mitigation to a CI test that fails the build if the
   invariant regresses (e.g. `TestHashDeviceID_KnownAnswer` already
   pins F1; `TestHashDeviceID_SaltRotationChangesHash` already pins
-  the C1 precondition).
+  the C1 precondition; `TestPublicKeyFingerprint_UniquePerKey` pins
+  D1; the AUTHZ-1 cluster in `users_test.go` pins the G1 surface
+  — see §Testability below).
 
 ---
 
@@ -234,7 +245,7 @@ different hash and breaks the contract.
 |-------------------------------------------------------|------------------------------------------------------------------------------------------|
 | App sandbox breach exposes private key                | `flutter_secure_storage` → Android Keystore / iOS Keychain (PR-29 §B for Keychain)       |
 | Server compromise exposes `server_salt`               | Salt is per-tenant; rotated on incident; `device_id_hash` is one-way SHA-256             |
-| Fingerprint collision across distinct devices         | 64-bit `[:16]` space — acceptable per `TestPublicKeyFingerprint_Distribution`           |
+| Fingerprint collision across distinct devices         | 64-bit `[:16]` space — acceptable per `TestPublicKeyFingerprint_UniquePerKey` (asserts distinct keys → distinct fingerprints) |
 | Client clock skew biases UUID v7 timestamp bits       | UUID v7 timestamp is *device-side*; server masks with its own `server_salt` (Risk A1)    |
 
 ### Follow-ups
@@ -369,7 +380,14 @@ On a successful `DeleteUser(ctx, hash)` the handler fires a
    network blip), the response is still 200 and the user-facing
    right-to-erasure is upheld. The 7-day KVKK SLA is guaranteed by
    the periodic background sweeper (`RunSweeper` → `SweepIdle`, every
-   60s) and a KVKK delete-audit log table.
+   `DefaultIdleSweepInterval = 60s`), which keeps Redis staleness
+   bounded at 15m max (`DefaultPoolTTL = 15 * time.Minute`). Audit
+   trail: slog warn-log on hook failure (`users.go` L117-119) +
+   cross-device attempts (`users.go` L92-95 with
+   `sub_matches_path: false`). No dedicated `kvkk_delete_audit`
+   table is needed because the user-facing right-to-erasure is
+   upheld by the synchronous step (1) regardless of step (2)
+   outcome.
 
 ### Defence-in-depth notes
 
@@ -459,7 +477,7 @@ need follow-up work.
 | `TestHashDeviceID_KnownAnswer` | `backend/internal/auth/keys_test.go` | C-3 (input order `uuid \|\| salt`); pins reference vector at keys.go L42-45 |
 | `TestHashDeviceID_SaltRotationChangesHash` | `backend/internal/auth/keys_test.go` | Risk C1 precondition (salt rotation must change hash) |
 | `TestPublicKeyFingerprint_KnownAnswer` | `backend/internal/auth/keys_test.go` | C-3 (fingerprint algorithm + length) |
-| `TestPublicKeyFingerprint_Distribution` | `backend/internal/auth/keys_test.go` | Risk D1 (collision rate at /16 truncation) |
+| `TestPublicKeyFingerprint_UniquePerKey` | `backend/internal/auth/keys_test.go` | Risk D1 (distinct keys → distinct fingerprints at /16 truncation) |
 | `TestMaskIP_ActuallyMasks` (v4/v6) | `backend/internal/operator/mask_test.go` | MaskIP /24 v4 /48 v6 contract |
 | `TestMaskIP_V4In6_UnmapsToV4` | `backend/internal/operator/mask_test.go` | v4-in-v6 unmapping |
 | `TestApplyIPMask_WritesMaskedQueryValue` | `backend/internal/operator/mask_test.go` | Regression pin for Sprint 1 PR-20 |
@@ -505,8 +523,8 @@ need follow-up work.
 | Sprint 5 | PR-33 | Anonim Cihaz Kimliği (DeviceIdentity) + Risk Register A1-G1 expansion; cross-platform implementation table; threat model |
 | Sprint 6 | **PR-37** (`91c6102` → `67a8c29`) | AUTHZ-1 — JWT `sub` MUST equal `device_id_hash` path on KVKK DELETE. **Closes cross-device deletion regression (AUTHZ-1 / STRIDE-6-04).** |
 | Sprint 6 | **PR-38** (`81854d0` → `730da02`) | pgx/v5 CVE chain guardrail: CI `govulncheck` + hermetic pin test. Defense-in-depth for the storage layer that holds the privacy contract. |
-| Sprint 7 | PR-39 / STRIDE-3-01 | `tool/ci_grep_privacy_violations.dart` — mobile CI guard for IMEI / TelephonyManager / getDeviceId / androidId (Sprint 7 Item 12, commit ba2fc31). Closes F1 anonimlik mobile grep gap. |
-| Sprint 7 | PR-39 / STRIDE-6-03 | Active Pool `DeleteByHash` + `SweepIdle` + `RunSweeper` — Redis-side KVKK DELETE propagation wired into `DeleteUserHook` (commit ba2fc31). |
+| Sprint 7 | PR-39 / STRIDE-3-01 | `tool/ci_grep_privacy_violations.dart` — mobile CI guard for IMEI / TelephonyManager / getDeviceId / androidId (Sprint 7 Item 12, commit `a9fed70`, merged via `7ff3efd`). Closes F1 anonimlik mobile grep gap. |
+| Sprint 7 | PR-39 / STRIDE-6-03 | Active Pool `DeleteByHash` + `SweepIdle` + `RunSweeper` — Redis-side KVKK DELETE propagation wired into `DeleteUserHook` (commit `ba2fc31` = Sprint 7 Item 4 merge). |
 | Sprint 8 | **This PR** (`feat/pr-s8-adr-0006-ext`) | Normative contract pin (C-1, C-2, C-3); KVKK DELETE cross-device section; MaskIP section; Testability section with named gaps. |
 
 ---
@@ -530,5 +548,5 @@ need follow-up work.
 * Sprint 1 PR-20 (MaskIP `.Masked()` fix): commit `2e4d492` → merge `8fcbeda`
 * Sprint 6 PR-37 (AUTHZ-1 JWT sub check): commit `91c6102` → merge `67a8c29`
 * Sprint 6 PR-38 (pgx/v5 CVE chain guardrail): commit `81854d0` → merge `730da02`
-* Sprint 7 STRIDE-3-01 (mobile CI grep): commit `ba2fc31` (Sprint 7 Item 12)
-* Sprint 7 STRIDE-6-03 (Active Pool KVKK purge): commit `ba2fc31` (Sprint 7 Item 4)
+* Sprint 7 STRIDE-3-01 (mobile CI grep): commit `a9fed70` → merge `7ff3efd` (Sprint 7 Item 12)
+* Sprint 7 STRIDE-6-03 (Active Pool KVKK purge): commit `ba2fc31` = Sprint 7 Item 4 merge
