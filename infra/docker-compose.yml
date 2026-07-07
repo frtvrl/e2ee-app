@@ -330,6 +330,17 @@ services:
   # RFC 5766 (TURN) + RFC 5389 (STUN). WebRTC için public UDP/TCP relay.
   # Kong Bypass — HTTP proxy'lerden geçemez (UDP).
   # Dış portlar doğrudan host'a açılır.
+  #
+  # Sprint 7 SCA-22 — TLS/DTLS production config (hand-off from
+  # cyber-security). COTURN_TLS_ENABLED=true olduğunda:
+  #   - --no-tls --no-dtls komutları kaldırılır
+  #   - 5349/tcp (TURNS) + 5349/udp (DTLS) portları host'a açılır
+  #   - certbot_data volume /etc/coturn/certs olarak mount edilir (RO)
+  #   - cert/pkey + cipher-list turnserver.conf'tan aktifleşir
+  #   - Mobile client turns://turn.opene2ee.com:5349 (TLS) veya
+  #     turn+dtls://turn.opene2ee.com:5349 (DTLS) URI kullanır
+  # Dev'de COTURN_TLS_ENABLED unset/false → mevcut davranış (plain UDP/TCP
+  # STUN-only, sertifika gerektirmez) korunur.
   # --------------------------------------------------------------------------
   coturn:
     <<: *default-restart
@@ -338,39 +349,41 @@ services:
     hostname: coturn
     # network_mode: host KULLANMA — external bridge ağ üzerinden gidelim
     # ki docker DNS / healthcheck çalışsın. Prod'da net=host + firewall tercih edilir.
-    command: >
-      -n
-      --log-file=stdout
-      --realm=${COTURN_REALM:-opene2ee.local}
-      --static-auth-secret=${COTURN_STATIC_SECRET:?COTURN_STATIC_SECRET gerekli}
-      --use-auth-secret
-      --no-tls
-      --no-dtls
-      --listening-port=${COTURN_LISTEN_PORT:-3478}
-      --min-port=${COTURN_MIN_PORT:-49152}
-      --max-port=${COTURN_MAX_PORT:-65535}
-      --fingerprint
-      --no-multicast-peers
-      --no-cli
-      --no-tcp-relay
-      --stale-nonce=600
-      --no-loopback-peers
-      --no-multicast-peers
-      --allowed-peer-ip=${COTURN_PUBLIC_IP:?COTURN_PUBLIC_IP gerekli (host'un dış IP'si)}
+    # Sprint 7 SCA-22 — entrypoint script COTURN_TLS_ENABLED env'ine göre
+    # dev/prod komut ayarlarını kurar (--no-tls/--no-dtls vs --tls/--dtls +
+    # cert/pkey + cipher-list). Detay: infra/coturn/entrypoint.sh.
+    command: ["/etc/coturn/entrypoint.sh"]
     volumes:
       - ./coturn/turnserver.conf:/etc/coturn/turnserver.conf:ro
+      - ./coturn/entrypoint.sh:/etc/coturn/entrypoint.sh:ro
       - coturn_data:/var/lib/coturn
+      # Certbot volume mount — RO. Üretimde certbot standard layout'a
+      # göre /etc/coturn/certs/live/${COTURN_TLS_DOMAIN}/ altında cert'leri
+      # bulur. Dev'de certbot_data boş olduğundan COTURN_TLS_ENABLED=false
+      # kalır ve entrypoint --no-tls --no-dtls modunda başlatır.
+      - certbot_data:/etc/coturn/certs:ro
     networks:
       - external
     ports:
-      # STUN/TURN UDP+TCP (RFC 5766)
+      # STUN/TURN UDP+TCP (RFC 5766) — plain (SCA-22: dev fallback)
       - "${COTURN_LISTEN_PORT:-3478}:3478/udp"
       - "${COTURN_LISTEN_PORT:-3478}:3478/tcp"
-      # TURN-over-TLS (opsiyonel, dev'de kapalı)
-      # - "${COTURN_TLS_PORT:-5349}:5349/tcp"
-      # - "${COTURN_TLS_PORT:-5349}:5349/udp"
       # Port range for relay
       - "${COTURN_MIN_PORT:-49152}-${COTURN_MAX_PORT:-65535}:${COTURN_MIN_PORT:-49152}-${COTURN_MAX_PORT:-65535}/udp"
+      # Sprint 7 SCA-22 — TURN-over-TLS (5349/tcp) + TURN-over-DTLS (5349/udp).
+      # Üretimde COTURN_TLS_ENABLED=true olduğunda entrypoint Coturn'u
+      # --tls --dtls ile başlatır ve bu portlar dinlenir. Dev'de unset → false
+      # → portlar host'a expose edilse bile Coturn listener'ı yok (unreachable,
+      # ancak healthcheck UDP 3478'i kullanır — fail olmaz).
+      - "${COTURN_TLS_PORT:-5349}:5349/tcp"
+      - "${COTURN_TLS_PORT:-5349}:5349/udp"
+    environment:
+      # Sprint 7 SCA-22 — TLS gate.
+      # Dev:  unset veya "false" → --no-tls --no-dtls
+      # Prod: "true" → --tls --dtls + cert/pkey + cipher-list (TLS 1.2+ only)
+      COTURN_TLS_ENABLED: "${COTURN_TLS_ENABLED:-false}"
+      COTURN_TLS_DOMAIN: "${COTURN_TLS_DOMAIN:-${DOMAIN:-opene2ee.local}}"
+      COTURN_TLS_CERTDIR: "${COTURN_TLS_CERTDIR:-/etc/coturn/certs}"
     healthcheck:
       test: ["CMD-SHELL", "nc -z -u 127.0.0.1 ${COTURN_LISTEN_PORT:-3478} || exit 1"]
       interval: 30s
