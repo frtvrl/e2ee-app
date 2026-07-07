@@ -1,0 +1,51 @@
+// mobile/ios/Config/Production.xcconfig
+//
+// PR-Sprint7-Item-13 (MOB-6) — Production (release / distribution) build
+// configuration.
+//
+// This file is wired in via `baseConfigurationReference` on the Release
+// build configurations in `Runner.xcodeproj/project.pbxproj` for the
+// Runner + OpenE2eeTunnelProvider targets (H4, H6). It holds the real
+// Apple Developer Team ID for signed App Store / Test Flight / Ad Hoc
+// distribution builds.
+//
+// DESIGN POSTURE: the placeholder is intentionally NOT a real value.
+// --------------------------------------------------------------------
+// The repository must never carry a real Team ID (it is a credential
+// tied to a paying Apple Developer Program membership and is revolvable
+// per-org). This file ships with a deliberately invalid placeholder so
+// `flutter build ios --release` will FAIL in CI until an operator
+// supplies the real value via the documented procedure (see
+// `docs/SETUP-iOS.md`). This is the same fail-closed posture used for
+// `JWT_SECRET` (Sprint 5 PR-32) and `REDIS_PASSWORD` (Sprint 7
+// SEC-6/7) — a missing/invalid secret must abort the build, never
+// silently embed an empty value.
+//
+// HOW TO POPULATE
+// ---------------
+// 1. Open `https://developer.apple.com/account/#!/membership` (App
+//    Store Connect → Membership) and copy the 10-character Team ID
+//    (e.g. `ABCDE12345`).
+// 2. Replace the `REPLACE_WITH_YOUR_APPLE_DEVELOPER_TEAM_ID` value
+//    below with that string — keep the trailing semicolon, do not add
+//    quotes (xcconfig treats the value as a literal string already).
+// 3. CI users: pass the value via a build-time environment variable
+//    in the macOS-latest leg of `.github/workflows/ios.yml`. The
+//    recommended pattern is:
+//      - Run `xcodegen` (or hand-edit) so the xcconfig reads
+//        `TEAMS_IDENTIFIER = $(OPENE2EE_TEAMS_IDENTIFIER)` and the
+//        GitHub Action exports the secret into the build environment.
+//      - OR keep the placeholder literal here and let CI overwrite it
+//        via a `sed` step in a pre-build phase.
+//    See `docs/SETUP-iOS.md` §3 for the exact run-script shape.
+//
+// Pre-flight (from ios-native-bridging.md)
+// ----------------------------------------
+// Verify before changing `baseConfigurationReference`:
+//   * This file is referenced by PBXFileReference UUID BD in pbxproj.
+//   * It is the base config for XCBuildConfiguration entries H4
+//     (Runner Release) and H6 (OpenE2eeTunnelProvider Release). The
+//     Debug + test configurations point at `Local.xcconfig` instead.
+
+TEAMS_IDENTIFIER = REPLACE_WITH_YOUR_APPLE_DEVELOPER_TEAM_ID
+OPENE2EE_BUILD_ENVIRONMENT = production

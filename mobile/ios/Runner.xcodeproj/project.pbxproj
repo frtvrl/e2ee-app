@@ -68,6 +68,8 @@
 		A100000000000000000000B5 /* Info.plist */ = {isa = PBXFileReference; lastKnownFileType = text.plist; path = Info.plist; sourceTree = "<group>"; };
 		A100000000000000000000B6 /* Info.plist */ = {isa = PBXFileReference; lastKnownFileType = text.plist; path = Info.plist; sourceTree = "<group>"; };
 		A100000000000000000000B7 /* OpenE2eeTunnelProviderTests.swift */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = sourcecode.swift; path = OpenE2eeTunnelProviderTests.swift; sourceTree = "<group>"; };
+		A100000000000000000000B8 /* Local.xcconfig */ = {isa = PBXFileReference; lastKnownFileType = text.xcconfig; name = Local.xcconfig; path = Config/Local.xcconfig; sourceTree = "<group>"; };
+		A100000000000000000000BD /* Production.xcconfig */ = {isa = PBXFileReference; lastKnownFileType = text.xcconfig; name = Production.xcconfig; path = Config/Production.xcconfig; sourceTree = "<group>"; };
 		A100000000000000000000C1 /* OpenE2eeTunnelProvider.appex */ = {isa = PBXFileReference; explicitFileType = "wrapper.app-extension"; includeInIndex = 0; path = OpenE2eeTunnelProvider.appex; sourceTree = BUILT_PRODUCTS_DIR; };
 		A100000000000000000000C2 /* Runner.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = Runner.app; sourceTree = BUILT_PRODUCTS_DIR; };
 		A100000000000000000000C3 /* RunnerTests.xctest */ = {isa = PBXFileReference; explicitFileType = wrapper.cfbundle; includeInIndex = 0; path = RunnerTests.xctest; sourceTree = BUILT_PRODUCTS_DIR; };
@@ -104,6 +106,8 @@
 				A100000000000000000000G2 /* Runner */,
 				A100000000000000000000G3 /* NetworkExtension */,
 				A100000000000000000000G5 /* RunnerTests */,
+				A100000000000000000000B8 /* Local.xcconfig */,
+				A100000000000000000000BD /* Production.xcconfig */,
 				A100000000000000000000G4 /* Products */,
 			);
 			sourceTree = "<group>";
@@ -441,11 +445,12 @@
 		};
 		A100000000000000000000H3 /* Debug */ = {
 			isa = XCBuildConfiguration;
+			baseConfigurationReference = A100000000000000000000B8 /* Local.xcconfig */;
 			buildSettings = {
 				CODE_SIGN_ENTITLEMENTS = Runner/Runner.entitlements;
 				CODE_SIGN_STYLE = Automatic;
 				CURRENT_PROJECT_VERSION = "$(FLUTTER_BUILD_NUMBER)";
-				DEVELOPMENT_TEAM = "";
+				DEVELOPMENT_TEAM = "$(TEAMS_IDENTIFIER)";
 				ENABLE_BITCODE = NO;
 				INFOPLIST_FILE = Runner/Info.plist;
 				LD_RUNPATH_SEARCH_PATHS = (
@@ -462,11 +467,12 @@
 		};
 		A100000000000000000000H4 /* Release */ = {
 			isa = XCBuildConfiguration;
+			baseConfigurationReference = A100000000000000000000BD /* Production.xcconfig */;
 			buildSettings = {
 				CODE_SIGN_ENTITLEMENTS = Runner/Runner.entitlements;
 				CODE_SIGN_STYLE = Automatic;
 				CURRENT_PROJECT_VERSION = "$(FLUTTER_BUILD_NUMBER)";
-				DEVELOPMENT_TEAM = "";
+				DEVELOPMENT_TEAM = "$(TEAMS_IDENTIFIER)";
 				ENABLE_BITCODE = NO;
 				INFOPLIST_FILE = Runner/Info.plist;
 				LD_RUNPATH_SEARCH_PATHS = (
@@ -483,12 +489,13 @@
 		};
 		A100000000000000000000H5 /* Debug */ = {
 			isa = XCBuildConfiguration;
+			baseConfigurationReference = A100000000000000000000B8 /* Local.xcconfig */;
 			buildSettings = {
 				APPLICATION_EXTENSION_API_ONLY = YES;
 				CODE_SIGN_ENTITLEMENTS = NetworkExtension/OpenE2eeTunnelProvider.entitlements;
 				CODE_SIGN_STYLE = Automatic;
 				CURRENT_PROJECT_VERSION = "$(FLUTTER_BUILD_NUMBER)";
-				DEVELOPMENT_TEAM = "";
+				DEVELOPMENT_TEAM = "$(TEAMS_IDENTIFIER)";
 				ENABLE_BITCODE = NO;
 				INFOPLIST_FILE = NetworkExtension/Info.plist;
 				LD_RUNPATH_SEARCH_PATHS = (
@@ -507,12 +514,13 @@
 		};
 		A100000000000000000000H6 /* Release */ = {
 			isa = XCBuildConfiguration;
+			baseConfigurationReference = A100000000000000000000BD /* Production.xcconfig */;
 			buildSettings = {
 				APPLICATION_EXTENSION_API_ONLY = YES;
 				CODE_SIGN_ENTITLEMENTS = NetworkExtension/OpenE2eeTunnelProvider.entitlements;
 				CODE_SIGN_STYLE = Automatic;
 				CURRENT_PROJECT_VERSION = "$(FLUTTER_BUILD_NUMBER)";
-				DEVELOPMENT_TEAM = "";
+				DEVELOPMENT_TEAM = "$(TEAMS_IDENTIFIER)";
 				ENABLE_BITCODE = NO;
 				INFOPLIST_FILE = NetworkExtension/Info.plist;
 				LD_RUNPATH_SEARCH_PATHS = (
@@ -531,12 +539,13 @@
 		};
 		A100000000000000000000H7 /* Debug */ = {
 			isa = XCBuildConfiguration;
+			baseConfigurationReference = A100000000000000000000B8 /* Local.xcconfig */;
 			buildSettings = {
 				ALWAYS_EMBED_SWIFT_STANDARD_LIBRARIES = YES;
 				BUNDLE_LOADER = "$(TEST_HOST)";
 				CODE_SIGN_STYLE = Automatic;
 				CURRENT_PROJECT_VERSION = "$(FLUTTER_BUILD_NUMBER)";
-				DEVELOPMENT_TEAM = "";
+				DEVELOPMENT_TEAM = "$(TEAMS_IDENTIFIER)";
 				GENERATE_INFOPLIST_FILE = YES;
 				IPHONEOS_DEPLOYMENT_TARGET = 15.0;
 				LD_RUNPATH_SEARCH_PATHS = (
@@ -555,12 +564,13 @@
 		};
 		A100000000000000000000H8 /* Release */ = {
 			isa = XCBuildConfiguration;
+			baseConfigurationReference = A100000000000000000000B8 /* Local.xcconfig */;
 			buildSettings = {
 				ALWAYS_EMBED_SWIFT_STANDARD_LIBRARIES = YES;
 				BUNDLE_LOADER = "$(TEST_HOST)";
 				CODE_SIGN_STYLE = Automatic;
 				CURRENT_PROJECT_VERSION = "$(FLUTTER_BUILD_NUMBER)";
-				DEVELOPMENT_TEAM = "";
+				DEVELOPMENT_TEAM = "$(TEAMS_IDENTIFIER)";
 				GENERATE_INFOPLIST_FILE = YES;
 				IPHONEOS_DEPLOYMENT_TARGET = 15.0;
 				LD_RUNPATH_SEARCH_PATHS = (

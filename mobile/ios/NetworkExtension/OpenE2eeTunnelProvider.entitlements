@@ -23,6 +23,14 @@
       tunnel can read the shared Keychain / UserDefaults blob for
       session hand-off.
 
+  Sprint 7 Item 13 (MOB-6) addition:
+    - `com.apple.developer.team-identifier` is REQUIRED for the App
+      Group above. It MUST mirror the value in `Runner.entitlements`
+      (both targets sign under the same Apple Developer Team). Sourced
+      from `$(TEAMS_IDENTIFIER)` via `mobile/ios/Config/Local.xcconfig`
+      or `mobile/ios/Config/Production.xcconfig`. See
+      `docs/SETUP-iOS.md` for the substitution procedure.
+
   Privacy: we deliberately omit any entitlement related to device
   identifiers (`com.apple.developer.device-information`) or location —
   per ADR-0006 these are forbidden.
@@ -30,6 +38,10 @@
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0">
 <dict>
+    <key>com.apple.developer.team-identifier</key>
+    <array>
+        <string>$(TEAMS_IDENTIFIER)</string>
+    </array>
     <key>com.apple.developer.networking.networkextension</key>
     <array>
         <string>packet-tunnel-provider</string>
