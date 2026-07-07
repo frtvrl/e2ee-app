@@ -35,6 +35,13 @@
 //     BTK MNP API (out of MVP scope, per HANDOFF §9).
 //   - Real TimescaleDB-backed matrix aggregator (the wire contract
 //     is in place; only the SQL pipeline is deferred).
+//
+// Sprint 7 SEC-1 — JWT_SECRET fail-closed posture. Production
+// deploys MUST supply a real JWT_SECRET env var. The dev fallback
+// (`OE2EE_ENV=dev`) is gated by a loud WARN with a structured
+// `fallback_dev=true` field so ops can alert on it. See
+// `devJWTSecret`, `isDevMode`, `loadConfig`, and
+// `logJWTSecretPosture` below.
 package main
 
 import (
@@ -101,6 +108,13 @@ type Config struct {
 	// PR-32, ADV-3).
 	JWTSecret []byte
 
+	// JWTSecretFallbackDev is true when loadConfig() had to fall
+	// back to the built-in dev secret (JWT_SECRET unset +
+	// OE2EE_ENV=dev). main() reads this to emit the WARN log
+	// with `fallback_dev=true`. NEVER set in production — see
+	// Sprint 7 SEC-1 for the threat model.
+	JWTSecretFallbackDev bool
+
 	// ShutdownTimeout caps how long srv.Shutdown is allowed to run
 	// before we force-kill the process. Sprint 1 default: 30s
 	// (matches the existing scaffold).
@@ -112,8 +126,36 @@ type Config struct {
 	HealthcheckTimeout time.Duration
 }
 
+// devJWTSecret is the fallback HS256 secret used ONLY when
+// JWT_SECRET is unset AND the process is explicitly running in
+// dev mode (OE2EE_ENV=dev). It MUST NEVER be used in production
+// — the goal of this constant is to keep `go run ./cmd/server`
+// ergonomic for local development without making it possible to
+// accidentally ship a backend that signs real auth tokens with
+// a well-known secret.
+//
+// Sprint 7 SEC-1 — replaces the previous silent default at the
+// call site in loadConfig(). Now loadConfig() either resolves a
+// real JWT_SECRET, falls back to this value with a loud WARN,
+// or fails closed with an error and exit code 1.
+const devJWTSecret = "opene2ee-jwt-dev-secret-32-bytes-min!"
+
+// isDevMode reports whether the process is running in dev mode
+// (OE2EE_ENV=dev). Dev mode enables ergonomic fallbacks for
+// local development; production deployments MUST run with
+// OE2EE_ENV unset (or set to anything other than "dev").
+//
+// Sprint 7 SEC-1: this is the gate that lets the JWT_SECRET dev
+// fallback fire. Flipping OE2EE_ENV to anything other than "dev"
+// — including "production", "prod", or simply unset — makes
+// loadConfig() fail-closed if JWT_SECRET is missing.
+func isDevMode() bool {
+	return strings.TrimSpace(os.Getenv("OE2EE_ENV")) == "dev"
+}
+
 // loadConfig reads env vars and applies defaults. Returns an error
-// only on parse failures (e.g. SERVER_PORT not a valid integer).
+// only on parse failures (e.g. SERVER_PORT not a valid integer) OR
+// on JWT_SECRET misconfiguration in non-dev mode (Sprint 7 SEC-1).
 //
 // Env vars (all optional unless :? marked):
 //
@@ -122,22 +164,21 @@ type Config struct {
 //	REDIS_ADDR           (default localhost:6379)
 //	REDIS_PASSWORD       (default "")
 //	SERVER_SALT          (default "opene2ee-v1-salt-dev-only-change-in-prod")
-//	JWT_SECRET           (default "" — required in production; a non-empty dev default keeps `go run ./cmd/server` ergonomic)
+//	JWT_SECRET           (required in non-dev mode; see OE2EE_ENV below)
+//	OE2EE_ENV            (set to "dev" to enable the dev JWT_SECRET fallback — NEVER set in production)
 //	SHUTDOWN_TIMEOUT_SEC (default 30)
 //	HEALTHCHECK_TIMEOUT_MS (default 2000)
 func loadConfig() (Config, error) {
 	c := Config{
-		ListenAddr:          ":8080",
-		DatabaseURL:         "postgres://opene2ee:opene2ee@localhost:5432/opene2ee?sslmode=disable",
-		RedisAddr:           "localhost:6379",
-		RedisPassword:       "",
-		ServerSalt:          "opene2ee-v1-salt-dev-only-change-in-prod",
-		// Dev default so `go run ./cmd/server` produces valid tokens
-		// without a .env file. In production this is overridden by
-		// docker-compose's `${JWT_SECRET:?...}` (required) expansion.
-		JWTSecret:          []byte("opene2ee-jwt-dev-secret-32-bytes-min!"),
-		ShutdownTimeout:    30 * time.Second,
-		HealthcheckTimeout: 2 * time.Second,
+		ListenAddr:           ":8080",
+		DatabaseURL:          "postgres://opene2ee:opene2ee@localhost:5432/opene2ee?sslmode=disable",
+		RedisAddr:            "localhost:6379",
+		RedisPassword:        "",
+		ServerSalt:           "opene2ee-v1-salt-dev-only-change-in-prod",
+		JWTSecret:            nil,
+		JWTSecretFallbackDev: false,
+		ShutdownTimeout:      30 * time.Second,
+		HealthcheckTimeout:   2 * time.Second,
 	}
 
 	if v := strings.TrimSpace(os.Getenv("SERVER_PORT")); v != "" {
@@ -162,9 +203,38 @@ func loadConfig() (Config, error) {
 	if v := strings.TrimSpace(os.Getenv("SERVER_SALT")); v != "" {
 		c.ServerSalt = v
 	}
-	if v := strings.TrimSpace(os.Getenv("JWT_SECRET")); v != "" {
-		c.JWTSecret = []byte(v)
+
+	// Sprint 7 SEC-1 — JWT_SECRET posture. Three cases:
+	//
+	//   1. JWT_SECRET set → use it; JWTSecretFallbackDev=false.
+	//   2. JWT_SECRET unset + OE2EE_ENV=dev → use devJWTSecret,
+	//      set JWTSecretFallbackDev=true so main() emits a loud
+	//      WARN. Ergonomic for `go run ./cmd/server`.
+	//   3. JWT_SECRET unset + OE2EE_ENV != "dev" → FAIL CLOSED
+	//      with an error so main() logs ERROR + exits 1.
+	//
+	// Defense-in-depth: infra/docker-compose.yml already pins
+	// JWT_SECRET with `${JWT_SECRET:?...}`, so a misconfigured
+	// production deploy is caught at compose-up time. This
+	// in-process check is the second layer that catches the
+	// case where someone runs the binary directly without
+	// compose (e.g. a misplaced `kubectl apply` of a raw pod
+	// spec, or a local-dev mistake that lands on a real env).
+	rawSecret := strings.TrimSpace(os.Getenv("JWT_SECRET"))
+	switch {
+	case rawSecret != "":
+		c.JWTSecret = []byte(rawSecret)
+		c.JWTSecretFallbackDev = false
+	case isDevMode():
+		c.JWTSecret = []byte(devJWTSecret)
+		c.JWTSecretFallbackDev = true
+	default:
+		return Config{}, fmt.Errorf(
+			"JWT_SECRET environment variable is required (set OE2EE_ENV=dev to enable the built-in dev fallback, " +
+				"or supply a real 32+ byte HS256 secret)",
+		)
 	}
+
 	if v := strings.TrimSpace(os.Getenv("SHUTDOWN_TIMEOUT_SEC")); v != "" {
 		n, err := strconv.Atoi(v)
 		if err != nil || n <= 0 {
@@ -193,9 +263,9 @@ func loadConfig() (Config, error) {
 // 200 only when every component reports "ok"; otherwise 503 so a
 // load-balancer can drain the pod.
 type healthCheck struct {
-	Status    string `json:"status"`           // "ok" | "error"
-	LatencyMS int64  `json:"latency_ms"`       // wall-clock time of the ping
-	Error     string `json:"error,omitempty"`  // populated only on Status="error"
+	Status    string `json:"status"`          // "ok" | "error"
+	LatencyMS int64  `json:"latency_ms"`      // wall-clock time of the ping
+	Error     string `json:"error,omitempty"` // populated only on Status="error"
 }
 
 // healthzResponse is the JSON body of GET /healthz. Top-level Status
@@ -327,12 +397,50 @@ func pingRedis(ctx context.Context, store *storage.RedisStore) healthCheck {
 // `slog.Default()` directly (the api package does this for the
 // access-log middleware if no logger is supplied) gets the same
 // handler.
+//
+// Sprint 7 SEC-1 — log level is `LevelInfo`. WARN is strictly
+// ABOVE Info in the slog.Level hierarchy, so the dev-fallback
+// WARN emitted by logJWTSecretPosture below cannot be silently
+// filtered out by the handler. If a future change lowers the
+// minimum level below WARN, the structured `fallback_dev=true`
+// field still surfaces on the always-on Info line in main()
+// (see "config loaded" log), so observability survives.
 func newLogger() *slog.Logger {
 	logger := slog.New(slog.NewJSONHandler(os.Stdout, &slog.HandlerOptions{
 		Level: slog.LevelInfo,
 	}))
 	slog.SetDefault(logger)
 	return logger
+}
+
+// logJWTSecretPosture emits the WARN log line when the JWT_SECRET
+// dev fallback was used (Sprint 7 SEC-1). The structured fields
+// are the observability contract:
+//
+//   - level = WARN  — visible above the Info-level baseline so
+//     ops dashboards / alerting that filter on level pick it up.
+//   - msg starts with "⚠️ DEV FALLBACK"  — visible to humans
+//     reading the JSON line in `kubectl logs` / `docker logs`.
+//   - fallback_dev = true  — boolean field for dashboards and
+//     metric extraction.
+//   - oe2ee_env = <value>  — records the env state at the moment
+//     of fallback so postmortems can confirm the gate fired.
+//
+// Extracted from main() so the structured-log contract is
+// unit-testable without booting Postgres / Redis. The function
+// is a no-op when JWTSecretFallbackDev is false, so production
+// starts stay quiet on the happy path.
+func logJWTSecretPosture(logger *slog.Logger, cfg Config) {
+	if !cfg.JWTSecretFallbackDev {
+		return
+	}
+	logger.Warn(
+		"⚠️ DEV FALLBACK — production refuses this: JWT_SECRET is unset and OE2EE_ENV=dev; "+
+			"using the built-in dev secret. This is UNSAFE for production — supply a real JWT_SECRET and "+
+			"unset OE2EE_ENV before deploying.",
+		"fallback_dev", true,
+		"oe2ee_env", os.Getenv("OE2EE_ENV"),
+	)
 }
 
 // -----------------------------------------------------------------------------
@@ -383,7 +491,17 @@ func main() {
 		// We log that the JWT secret is set, NOT its value —
 		// the value is the auth credential.
 		"jwt_secret_configured", len(cfg.JWTSecret) > 0,
+		// Sprint 7 SEC-1 — surface the dev-fallback state on the
+		// always-on Info line so a misconfigured deploy shows up
+		// in metrics/log queries even if the operator misses the
+		// WARN. Defaults to false on the production happy path.
+		"jwt_secret_fallback_dev", cfg.JWTSecretFallbackDev,
 	)
+
+	// Sprint 7 SEC-1 — emit the loud WARN if the dev fallback
+	// fired. Extracted into a helper so the structured-log
+	// contract is unit-testable (see main_test.go).
+	logJWTSecretPosture(logger, cfg)
 
 	// Long-lived startup context. Bounded generously — Postgres /
 	// Redis dialing is usually sub-second, but a slow first connect
@@ -449,18 +567,18 @@ func main() {
 	// api.OperatorLookup (LookupByPhone + LookupByIP). pgStore
 	// satisfies every storage.* subset the api package depends on.
 	apiSvc, err := api.New(api.Config{
-		Logger:     logger,
-		Sessions:   pgStore,
-		Telemetry:  pgStore,
-		Users:      pgStore,
-		Operator:   opSvc,
-		Matrix:     matrix,
-		Devices:    pgStore,
+		Logger:    logger,
+		Sessions:  pgStore,
+		Telemetry: pgStore,
+		Users:     pgStore,
+		Operator:  opSvc,
+		Matrix:    matrix,
+		Devices:   pgStore,
 		// Sprint 5 PR-32 (ADV-3): JWT_SECRET — HS256 shared secret
 		// used by /api/v1/auth (IssueJWT) and the IsAuthorized
 		// middleware. MUST match Kong's JWT_SECRET (see
 		// infra/kong/kong.yml + infra/docker-compose.yml).
-		JWTSecret:  cfg.JWTSecret,
+		JWTSecret: cfg.JWTSecret,
 		// DeleteUserHook intentionally omitted in Sprint 1 — the
 		// Active Pool purge for KVKK deletes will be added once
 		// the matching package exposes a DeleteByHash on its
