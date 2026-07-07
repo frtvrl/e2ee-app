@@ -1,0 +1,19 @@
+# tools/.gitignore — keep generated artefacts out of the repo.
+#
+# __pycache__/    — Python bytecode, regenerated on every scan
+# *.pyc           — same
+#
+# tools/bin/ is NOT ignored — pinned binaries (jq, curl, ...) land here
+# at install time and SHOULD be tracked. An empty bin/ is fine; the
+# .gitkeep sentinel keeps the directory alive in the working tree.
+
+__pycache__/
+*.pyc
+
+# tools/bin/.pins.tmp / .artefact / .sums / .extract-* are intermediate
+# artefacts left behind by install-pinned.sh; they are cleaned up by the
+# installer on success but if a run was interrupted they may linger.
+.tools-tmp/
+
+# Keep tools/bin/ tracked even when empty.
+!tools/bin/.gitkeep

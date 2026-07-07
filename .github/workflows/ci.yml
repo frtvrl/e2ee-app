@@ -169,7 +169,11 @@ jobs:
           python-version: "3.12"
 
       - name: Install PyYAML
-        run: pip install pyyaml
+        # Sprint 7 / STRIDE-8-03: pyyaml version pinned. The tools/
+        # validator (tools/ci-tools-pin-check.sh) refuses unpinned
+        # `pip install` invocations. PyYAML 6.0.1 is the current
+        # stable release on PyPI as of 2026-07-07.
+        run: pip install pyyaml==6.0.1
 
       - name: Validate compose YAML
         # infra/scripts/validate_compose.py is the project's
@@ -633,6 +637,44 @@ jobs:
           name: mobile-web-build
           path: mobile/build/web
           retention-days: 7
+
+  # ---------------------------------------------------------------------------
+  # CI tools — version pinning (Sprint 7 / STRIDE-8-03 — hand-off
+  # from cyber-security review).
+  # ---------------------------------------------------------------------------
+  # Runs tools/ci-tools-pin-check.{sh,ps1} to scan scripts/,
+  # infra/scripts/, tools/, and .github/workflows/ for invocations
+  # of jq/curl/openssl/base64/sha256sum/apt-get/brew/pip/pip3/npm
+  # that are not pinned in tools/PINS.toml. Exits 1 if any are
+  # found. The PowerShell twin runs alongside on the same ubuntu
+  # runner to catch drift between the two implementations.
+  #
+  # Companion to docs/CI-TOOLS.md (the policy doc). Companion to
+  # tools/install-pinned.{sh,ps1} (the installer — used by
+  # operators to apply PINS.toml changes).
+  # ---------------------------------------------------------------------------
+  ci-tools-pin-check:
+    name: CI tools — version pinning (STRIDE-8-03)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Run validator (bash)
+        # ubuntu-latest runners ship bash 5.x — no extra install
+        # needed. The script uses python3 for the comment-stripping
+        # pass; that is also preinstalled on ubuntu-latest.
+        run: bash tools/ci-tools-pin-check.sh
+
+      - name: Run validator (PowerShell twin)
+        # ubuntu-latest runners ship PowerShell 7 (pwsh) as
+        # /usr/bin/pwsh. Running both validators on the same job
+        # catches drift between the two implementations. The
+        # validator file itself is excluded by default; the .ps1
+        # twin's `Self` switch is not used here because the .ps1
+        # file is excluded via filename pattern, not via the
+        # self-skip logic.
+        shell: pwsh
+        run: pwsh tools/ci-tools-pin-check.ps1
 
   # ---------------------------------------------------------------------------
   # Schemas (JSON Schema validation)

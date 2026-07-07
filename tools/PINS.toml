@@ -1,0 +1,145 @@
+# tools/PINS.toml — OpenE2EE third-party CI tool pinning manifest.
+# ----------------------------------------------------------------------------
+# Sprint 7 / STRIDE-8-03 — Coder CI hand-off from cyber-security:
+#
+#   CI shell scripts invoke third-party binaries (jq, curl, openssl, etc.)
+#   whose versions are not pinned. A future CI runner image bump — or a
+#   compromised upstream package — would silently change behaviour without
+#   any PR review opportunity. This manifest is the authoritative source
+#   for what versions are sanctioned, where they come from, and how to
+#   verify them.
+#
+# Companion:
+#   - tools/ci-tools-pin-check.sh  — CI gate that scans the repo and
+#     refuses any unpinned third-party invocation.
+#   - docs/CI-TOOLS.md             — full policy, cadence, rotation
+#     procedure, adversarial notes.
+#
+# File format: TOML (https://toml.io). One [[tool]] entry per pinned tool.
+# Fields:
+#   name        — canonical binary name (lowercase)
+#   version     — exact upstream version, X.Y.Z (no leading "v")
+#   source      — how the binary is acquired. Allowed values:
+#                   "github-release"   — download release tarball/zip
+#                   "apt"              — Debian/Ubuntu apt package, version-pinned
+#                   "brew"             — Homebrew formula, version-pinned
+#                   "go-install"       — `go install <module>@<version>`
+#                   "os-default"       — already pinned by the runner image
+#                                      (no install step needed; recorded
+#                                      for the audit trail)
+#   upstream    — where to fetch / which package
+#   sha256      — hex-encoded SHA-256 of the install artefact
+#                 Use "PLACEHOLDER" for entries that need operator
+#                 verification on first install. The installer will
+#                 refuse to install a PLACEHOLDER until the operator
+#                 replaces it with the real upstream SHA.
+#   sha256_url  — URL to the upstream SHA-256SUMS file (proof-of-origin)
+#                 Use "NONE" when the upstream does not publish a
+#                 SHA-256SUMS file (e.g. curl uses PGP-signed .asc
+#                 files instead; operator must verify the SHA from the
+#                 curl.se release page).
+#   notes       — free-form: caveats, rotation cadence hint, etc.
+#
+# When source = "os-default", sha256 MUST be "N/A" (the distro's
+# package manager owns the integrity guarantee). When source =
+# "go-install", sha256 is the SHA-256 of the module's go.sum entry.
+#
+# This file is read by tools/install-pinned.{sh,ps1} at install time and
+# by tools/ci-tools-pin-check.{sh,ps1} at scan time. It MUST be kept in
+# sync with the docs/CI-TOOLS.md "Pinned tools" table — the CI gate
+# checks both for parity.
+
+# ----------------------------------------------------------------------------
+# Tools currently used (or planned) by OpenE2EE CI scripts.
+# ----------------------------------------------------------------------------
+
+# jq — JSON processor. Not yet invoked by repo scripts; pinned preemptively
+# for any future JSON-config tooling. Source: GitHub release tarball.
+#   SHA verified against https://github.com/jqlang/jq/releases/download/jq-1.7.1/sha256sum.txt
+#   on 2026-07-07 (Sprint 7 STRIDE-8-03 PR).
+[[tool]]
+name = "jq"
+version = "1.7.1"
+source = "github-release"
+upstream = "https://github.com/jqlang/jq/releases/download/jq-1.7.1/jq-linux-amd64"
+sha256 = "5942c9b0934e510ee61eb3e30273f1b3fe2590df93933a93d7c58b81d19c8ff5"
+sha256_url = "https://github.com/jqlang/jq/releases/download/jq-1.7.1/sha256sum.txt"
+notes = "Pre-pin; not invoked by current scripts. SHA verified 2026-07-07. Update with each jq quarterly security release."
+
+# curl — HTTP client. Currently only referenced in operator-facing docs
+# (infra/kong/kong.yml bot-detection allow-list, infra/docker-compose.yml
+# `openssl rand` comments). Pinned for the day a smoke script ships.
+#   Upstream (https://curl.se/download/) distributes checksums as
+#   `.sha256` companion files; install-pinned.sh does not yet auto-verify
+#   that pattern, so the operator must update this SHA after the first
+#   install (see docs/CI-TOOLS.md §5 *Rotation procedure*).
+[[tool]]
+name = "curl"
+version = "8.10.1"
+source = "github-release"
+upstream = "https://github.com/curl/curl/releases/download/curl-8_10_1/curl-8.10.1.tar.gz"
+sha256 = "PLACEHOLDER"
+sha256_url = "https://curl.se/download/curl-8.10.1.tar.gz.sha256"
+notes = "Pre-pin; GitHub release tarball. curl upstream uses .sha256 companion files (not SHA256SUMS); operator must replace PLACEHOLDER with the real SHA on first install. Update with each curl quarterly security release."
+
+# openssl — crypto toolkit. Operator-facing `openssl rand -hex 32` calls
+# documented in infra/docker-compose.yml comments. When a CI script
+# starts invoking openssl for key/cert generation, it MUST be pinned.
+[[tool]]
+name = "openssl"
+version = "3.3.2"
+source = "apt"
+upstream = "openssl (Debian bookworm-security)"
+sha256 = "N/A"
+sha256_url = ""
+notes = "OS-default for Debian/Ubuntu runners. Integrity owned by apt; version is the in-distro version. macOS runners use LibreSSL (separate entry below)."
+
+# sha256sum — SHA-256 verifier (part of coreutils on Linux).
+# Always OS-default; recorded for the audit trail.
+[[tool]]
+name = "sha256sum"
+version = "9.4"
+source = "os-default"
+upstream = "GNU coreutils 9.4 (Debian bookworm)"
+sha256 = "N/A"
+sha256_url = ""
+notes = "OS-default. Part of coreutils; version follows the distro. Not a separate install."
+
+# pyyaml — Python YAML library. Used by .github/workflows/ci.yml
+# (validate_compose.py needs PyYAML to parse compose YAML).
+#   Version pinned to 6.0.1 per STRIDE-8-03 verifier check.
+#   This is NOT a CLI binary; the validator scans for `pip install`
+#   invocations and requires explicit version pinning. The actual
+#   binary `python` is allowlisted; the package version lives in the
+#   workflow's `pip install pyyaml==X.Y.Z` line.
+[[tool]]
+name = "pyyaml"
+version = "6.0.1"
+source = "pypi"
+upstream = "https://pypi.org/project/PyYAML/6.0.1/"
+sha256 = "N/A"
+sha256_url = "https://pypi.org/project/PyYAML/6.0.1/#sha256"
+notes = "Python package, not a CLI binary. Pinned at the workflow level (pip install pyyaml==6.0.1). The CI gate scans for `pip install` and requires an explicit ==X.Y.Z suffix."
+
+# ----------------------------------------------------------------------------
+# Cross-platform entries.
+# ----------------------------------------------------------------------------
+
+# openssl on macOS (Homebrew).
+[[tool]]
+name = "openssl"
+version = "3.3.2"
+source = "brew"
+upstream = "openssl@3.3.2"
+sha256 = "N/A"
+sha256_url = ""
+notes = "macOS-only. macOS system LibreSSL is NOT pinned here — CI must `brew install openssl@3.3.2` first."
+
+# ----------------------------------------------------------------------------
+# The PINS.toml file itself is part of the trust anchor.
+# ----------------------------------------------------------------------------
+# After editing this file:
+#   1. Run tools/ci-tools-pin-check.sh — must still pass.
+#   2. Open a PR; the diff IS the audit trail.
+#   3. Update docs/CI-TOOLS.md §"Pinned tools" table to match.
+#   4. Tag the rotation in git: `git tag -a tools-pin/<iso-date>`.

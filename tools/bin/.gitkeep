@@ -1,0 +1,4 @@
+# Sentinel — keeps tools/bin/ tracked even when empty.
+# tools/bin/ is the install target for github-release artefacts
+# (see tools/install-pinned.{sh,ps1}). Operators populate it via
+# `bash tools/install-pinned.sh` after updating tools/PINS.toml.
