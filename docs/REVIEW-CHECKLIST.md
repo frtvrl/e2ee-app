@@ -139,7 +139,7 @@ documents are **out of scope** for this checklist:
   (ADV-1..ADV-4), non-blocking advisory register.
 * `docs/SPRINT-2-HOTFIX-INFRA-CONFIG.md` — Architect spec for the
   4-file PR-13 follow-up.
-* `docs/SPRINT-7-MAIN-MERGE-XCHECK.md` — Sprint 7 merge cross-check
+* `docs/SPRINT-7-MERGE-XCHECK.md` — Sprint 7 merge cross-check
   (35 commits ahead of Sprint 6 base).
 * `docs/SPRINT-8-SCOPE.md` Item 3 — this checklist's task brief.
 * `docs/ADR-0006-anonimlik.md` — anonimlik / veri minimizasyonu ADR
@@ -150,8 +150,8 @@ documents are **out of scope** for this checklist:
   (Sprint 8 Item 6 extension).
 * `infra/kong/kong.yml` — current Kong JWT-enabled config (PR-32 +
   AUTHZ-2 /healthz extension).
-* `infra/nginx/nginx.conf` — current nginx config (still missing
-  HTTPS redirect — ADV-4 carry-over).
+* `infra/nginx/nginx.conf` — current nginx config (Sprint 3 ADV-4
+  HTTPS redirect at lines 14-18).
 * `docs/policy/KONG-UPGRADE-POLICY.md` — Kong cadence policy
   (S7-OPEN-1 grandfather clause).
 
@@ -162,5 +162,6 @@ documents are **out of scope** for this checklist:
 **Pattern:** Sprint 2 §6 register + Sprint 7 §6 carry-over + Sprint 8 ADR cross-links
 **Push kararı:** §8 user/Architect onayı sonrası
 **Amaç:** Sprint 9+ planner için somut carry-over listesi (review
-ihlalleri tek dosyada toplanmış, ADV-2/ADV-3 kapalı, geri kalan
-ADV-1/ADV-4 + Sprint 7 open'lar Sprint 9+'a taşınır)
+ihlalleri tek dosyada toplanmış; ADV-1/ADV-2/ADV-4 Sprint 3'te
+kapalı, ADV-3 partial; Sprint 7 carry-over S7-OPEN-1..3 + MP-CI-OPEN-1
+Sprint 9+'a taşınır)
