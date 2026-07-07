@@ -412,7 +412,13 @@ services:
       backend:
         condition: service_healthy
     healthcheck:
-      test: ["CMD-SHELL", "wget -qO- http://localhost/healthz || exit 1"]
+      # Sprint 7 AUTHZ-2 — /healthz is JWT-protected at Kong (per
+      # infra/kong/kong.yml `healthz` route). The nginx container
+      # has no JWT credential, so we ping the backend directly via
+      # the internal Docker network (`backend:8080/healthz`) to
+      # confirm upstream reachability. External probes must present
+      # a JWT (see infra/kong/README.md §"Health Check").
+      test: ["CMD-SHELL", "wget -qO- http://backend:8080/healthz || exit 1"]
       interval: 30s
       timeout: 5s
       retries: 3

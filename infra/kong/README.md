@@ -22,11 +22,13 @@ route on `e2ee-backend` — public and protected alike:
 Disable a service-level plugin: edit `kong.yml` → remove the entry under
 `services[].plugins` → `docker compose restart kong`.
 
-### Route-level — JWT (Sprint 5 PR-32, ADV-3)
+### Route-level — JWT (Sprint 5 PR-32, ADV-3; Sprint 7 AUTHZ-2 hardening)
 
 The **JWT plugin** is wired on a per-route basis, NOT service-level, so it
 fires ONLY on the **protected subtree** (see "Routes" below). The plugin
-config is the same on every protected route:
+config is the same on every protected route, including the new `healthz`
+route added in Sprint 7 to close the AUTHZ-2 gap (an unauthenticated
+attacker probing Postgres / Redis pool status via `/healthz`):
 
 ```yaml
 plugins:
@@ -37,13 +39,19 @@ plugins:
         - exp
 ```
 
-Plus a **Consumer** at the top of the yaml holds the shared HS256 secret:
+Plus **two Consumers** at the top of the yaml hold the shared HS256
+secret — one for end-user mobile clients, one for `/healthz` monitoring:
 
 ```yaml
 consumers:
   - username: opene2ee-mobile
     jwt_secrets:
       - key: opene2ee-backend
+        algorithm: HS256
+        secret: "{vault://env/jwt-secret}"
+  - username: opene2ee-monitoring
+    jwt_secrets:
+      - key: opene2ee-monitoring
         algorithm: HS256
         secret: "{vault://env/jwt-secret}"
 ```
@@ -112,6 +120,15 @@ required a token would be chicken-and-egg.
 | `api-v1-webrtc-offer`            | `/api/v1/webrtc/offer`                     | POST         |
 | `api-v1-webrtc-answer`           | `/api/v1/webrtc/answer`                    | POST         |
 | `api-v1-webrtc-ice`              | `/api/v1/webrtc/ice`                       | POST         |
+| `healthz`                        | `/healthz`                                 | GET          |
+
+The `healthz` route is the **Sprint 7 AUTHZ-2 hardening**: the Go
+backend's `/healthz` handler returns a JSON body containing
+`postgres.status` / `redis.status` + the live Active-Pool size, so
+leaving it unauthenticated lets an attacker fingerprint the
+deployment and time probes to backend-disruption events. Kong now
+requires a valid JWT on `GET /healthz` before forwarding to the
+backend.
 
 Path matching:
 
@@ -200,6 +217,61 @@ Kong admin API: `http://localhost:8001/status`
 ```bash
 curl -s http://localhost:8001/status | jq .
 ```
+
+### Application `/healthz` (Sprint 7 AUTHZ-2)
+
+The Go backend exposes `GET /healthz` for liveness probes. The
+response body includes `postgres.status`, `redis.status`, and the
+Active Pool size (`pool.count`) — sensitive post-Sprint-3 deployment
+metadata that **must not leak to unauthenticated callers**.
+
+Two consumer credentials exist in `kong.yml`:
+
+| Consumer                  | `iss` claim (`jwt_secrets.key`) | Audience                       |
+|---------------------------|---------------------------------|--------------------------------|
+| `opene2ee-mobile`         | `opene2ee-backend`              | End-user mobile clients        |
+| `opene2ee-monitoring`     | `opene2ee-monitoring`           | External uptime / Prometheus   |
+
+#### External probe (Prometheus blackbox, status page)
+
+Mint a JWT signed with `JWT_SECRET` and `iss=opene2ee-monitoring`
+(any standard HS256 library), then:
+
+```bash
+curl -i http://localhost:8000/healthz \
+  -H "Authorization: Bearer $TOKEN"
+# → 200 OK + JSON body
+```
+
+No token (or expired / wrong-iss token) returns **401 Unauthorized**
+at the gateway and never reaches the backend. There is no anonymous
+fallback by design (Sprint 7 AUTHZ-2).
+
+#### Container healthcheck (Docker internal network)
+
+`backend`'s Docker healthcheck already pings `localhost:8080/healthz`
+directly via the internal network, **bypassing Kong** (no token
+needed). `nginx`'s healthcheck (Sprint 7 follow-up edit) now also
+pings `http://backend:8080/healthz` directly for the same reason.
+
+```bash
+# From INSIDE the backend container
+wget -qO- http://localhost:8080/healthz
+
+# From INSIDE the nginx container (shares the `external` Docker
+# network with backend)
+wget -qO- http://backend:8080/healthz
+```
+
+If you change the backend listen port (default `8080`), update
+both healthcheck blocks in `infra/docker-compose.yml`.
+
+A runnable smoke test lives at `scripts/smoke/healthz-jwt.sh`; it
+expects the Kong proxy to be reachable at `$KONG_PROXY_URL`
+(default `http://localhost:8000`) and asserts that a request
+**without** `Authorization` returns 401, while a request **with** a
+freshly-minted HS256 JWT (using `iss=opene2ee-monitoring`) returns
+200 + JSON.
 
 ## Logs
 

@@ -21,6 +21,9 @@ _format_version: "3.0"
 #     - POST /api/v1/webrtc/offer
 #     - POST /api/v1/webrtc/answer
 #     - POST /api/v1/webrtc/ice
+#     - GET  /healthz                (Sprint 7 AUTHZ-2 — liveness
+#                                     probe behind JWT, monitoring
+#                                     consumer credential)
 #
 # JWT plugin config (per protected route):
 #   - algorithm: HS256 (matches what the Go backend's auth.IssueJWT signs)
@@ -31,6 +34,23 @@ _format_version: "3.0"
 #   - claims_to_verify: [exp] — Kong validates expiry at the gateway.
 #                       The Go backend's IsAuthorized middleware does
 #                       the full HS256 + iss check as defence-in-depth.
+#
+# Consumers:
+#   - opene2ee-mobile     — JWT credential for end-user mobile clients.
+#                           `iss=opene2ee-backend` matches the backend's
+#                           auth.Issuer (Sprint 5 PR-32 contract).
+#   - opene2ee-monitoring — JWT credential for ops/CI probing /healthz.
+#                           Same HS256 secret; `iss` is the same key so
+#                           the token validates against the consumer's
+#                           jwt_secrets.key. Authorization: Bearer ...
+#                           required; no anonymous exemption (Sprint 7
+#                           AUTHZ-2 hardens against unauthenticated
+#                           probing of /healthz which leaks Postgres /
+#                           Redis pool status).
+#   Container healthchecks (Docker internal network) bypass Kong and
+#   hit http://backend:8080/healthz directly — they do NOT need a
+#   token. External probes MUST present a JWT (see README §"Health
+#   Check" for the monitoring consumer credential acquisition flow).
 #
 # Path matching:
 #   - Kong's `paths` field accepts plain prefix strings (literal match)
@@ -53,6 +73,20 @@ consumers:
     # vault is loaded.
     jwt_secrets:
       - key: opene2ee-backend
+        algorithm: HS256
+        secret: "{vault://env/jwt-secret}"
+
+  - username: opene2ee-monitoring
+    # Sprint 7 AUTHZ-2 — monitoring consumer for /healthz probes.
+    # Same HS256 secret as the mobile consumer (shared via
+    # {vault://env/jwt-secret}); the key `opene2ee-monitoring`
+    # is the consumer-specific `iss` claim. CI / Prometheus blackbox
+    # exporters can mint a long-lived JWT externally with the right
+    # `iss` and present it as `Authorization: Bearer ...` to access
+    # /healthz. The backend's IsAuthorized middleware is the
+    # defence-in-depth layer that verifies the HS256 + iss end-to-end.
+    jwt_secrets:
+      - key: opene2ee-monitoring
         algorithm: HS256
         secret: "{vault://env/jwt-secret}"
 
@@ -219,6 +253,29 @@ services:
           - /api/v1/webrtc/ice
         methods:
           - POST
+        plugins:
+          - name: jwt
+            config:
+              secret_is_base64: false
+              claims_to_verify:
+                - exp
+
+      # Sprint 7 AUTHZ-2 — healthz sits OUTSIDE the /api/v1 subtree
+      # but is still JWT-protected so a network attacker cannot
+      # probe Postgres / Redis pool status without a valid token.
+      #
+      # Internal Docker healthchecks bypass Kong entirely and
+      # ping `http://backend:8080/healthz` directly (see infra/
+      # docker-compose.yml backend service healthcheck). External
+      # Prometheus / uptime probes obtain a JWT via the standard
+      # `POST /api/v1/auth` login (or a long-lived monitoring
+      # JWT minted by ops with `iss=opene2ee-monitoring`) and
+      # present it as `Authorization: Bearer ...`.
+      - name: healthz
+        paths:
+          - /healthz
+        methods:
+          - GET
         plugins:
           - name: jwt
             config:
