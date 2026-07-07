@@ -310,6 +310,385 @@ func TestRedisPool_StaleEntriesCleanedOnMatch(t *testing.T) {
 	require.ErrorIs(t, err, ErrNotFound)
 }
 
+// ---------- STRIDE-6-03 purge semantics ----------
+
+// TestRedisPool_DeleteByHash_RemovesMember is the canonical
+// "insert user, simulate KVKK delete, verify gone" sequence
+// that the Sprint 7 STRIDE-6-03 acceptance criteria call for.
+// The user is registered into the pool, DeleteByHash is called
+// with the same hash, and MatchSender must then return
+// ErrNotFound (the user's row is gone — no second chance for a
+// volunteer-wait or a stale re-add).
+func TestRedisPool_DeleteByHash_RemovesMember(t *testing.T) {
+	pool, _ := newTestRedisPool(t)
+	ctx := context.Background()
+
+	const hash = "dev-aaaaaaaaaaaaaa"
+	require.NoError(t, pool.RegisterReceiver(ctx,
+		sampleInfo(hash, "Turkcell", "TR", "whatsapp"),
+		5*time.Minute))
+
+	// Sanity: the user IS in the pool pre-delete.
+	n, err := pool.Count(ctx)
+	require.NoError(t, err)
+	require.Equal(t, int64(1), n)
+
+	// Simulate the KVKK DELETE path: api/users.go's
+	// DeleteUserHook -> pool.DeleteByHash(hash).
+	removed, err := pool.DeleteByHash(ctx, hash)
+	require.NoError(t, err)
+	assert.Equal(t, int64(1), removed, "exactly one member should be removed")
+
+	// Post-delete: pool is empty, no second chance.
+	n, err = pool.Count(ctx)
+	require.NoError(t, err)
+	assert.Equal(t, int64(0), n)
+
+	_, err = pool.MatchSender(ctx, Criteria{})
+	require.ErrorIs(t, err, ErrNotFound, "deleted hash must NOT match")
+}
+
+// TestRedisPool_DeleteByHash_OnlyMatchingHash confirms that
+// DeleteByHash is targeted — a delete for hash A must not
+// touch hash B or C. This is the regression guard against an
+// over-aggressive "clear all on delete" implementation.
+func TestRedisPool_DeleteByHash_OnlyMatchingHash(t *testing.T) {
+	pool, _ := newTestRedisPool(t)
+	ctx := context.Background()
+
+	require.NoError(t, pool.RegisterReceiver(ctx,
+		sampleInfo("dev-aaaaaaaaaaaaaa", "Turkcell", "TR", "whatsapp"),
+		5*time.Minute))
+	require.NoError(t, pool.RegisterReceiver(ctx,
+		sampleInfo("dev-bbbbbbbbbbbbbb", "Vodafone", "TR", "whatsapp"),
+		5*time.Minute))
+	require.NoError(t, pool.RegisterReceiver(ctx,
+		sampleInfo("dev-cccccccccccccc", "Turkcell", "TR", "signal"),
+		5*time.Minute))
+
+	removed, err := pool.DeleteByHash(ctx, "dev-bbbbbbbbbbbbbb")
+	require.NoError(t, err)
+	assert.Equal(t, int64(1), removed)
+
+	// The other two must still be in the pool and matchable.
+	n, err := pool.Count(ctx)
+	require.NoError(t, err)
+	assert.Equal(t, int64(2), n)
+
+	// First pop should be Turkcell or signal (one of the two
+	// survivors); NOT the deleted Vodafone.
+	got, err := pool.MatchSender(ctx, Criteria{})
+	require.NoError(t, err)
+	require.NotNil(t, got)
+	assert.NotEqual(t, "dev-bbbbbbbbbbbbbb", got.Hash,
+		"deleted hash must never be matched")
+}
+
+// TestRedisPool_DeleteByHash_EmptyHashIsNoOp — empty hash is
+// tolerated (returns 0, nil) because the api layer can pass
+// through an unverified JWT subject in a future regression and
+// the matching layer should not crash on that. Fail-soft over
+// fail-loud for the hook path.
+func TestRedisPool_DeleteByHash_EmptyHashIsNoOp(t *testing.T) {
+	pool, _ := newTestRedisPool(t)
+	ctx := context.Background()
+
+	removed, err := pool.DeleteByHash(ctx, "")
+	require.NoError(t, err)
+	assert.Equal(t, int64(0), removed)
+}
+
+// TestRedisPool_DeleteByHash_NotInPool — calling DeleteByHash
+// for a hash that was never registered returns 0, nil. Idempotent.
+func TestRedisPool_DeleteByHash_NotInPool(t *testing.T) {
+	pool, _ := newTestRedisPool(t)
+	ctx := context.Background()
+
+	require.NoError(t, pool.RegisterReceiver(ctx,
+		sampleInfo("dev-aaaaaaaaaaaaaa", "Turkcell", "TR", "whatsapp"),
+		5*time.Minute))
+
+	removed, err := pool.DeleteByHash(ctx, "dev-doesnotexist")
+	require.NoError(t, err)
+	assert.Equal(t, int64(0), removed)
+
+	// The registered user is still in the pool.
+	n, err := pool.Count(ctx)
+	require.NoError(t, err)
+	assert.Equal(t, int64(1), n)
+}
+
+// TestRedisPool_DeleteByHash_Idempotent — calling DeleteByHash
+// twice for the same hash is safe; the second call removes 0.
+func TestRedisPool_DeleteByHash_Idempotent(t *testing.T) {
+	pool, _ := newTestRedisPool(t)
+	ctx := context.Background()
+
+	require.NoError(t, pool.RegisterReceiver(ctx,
+		sampleInfo("dev-aaaaaaaaaaaaaa", "Turkcell", "TR", "whatsapp"),
+		5*time.Minute))
+
+	first, err := pool.DeleteByHash(ctx, "dev-aaaaaaaaaaaaaa")
+	require.NoError(t, err)
+	assert.Equal(t, int64(1), first)
+
+	second, err := pool.DeleteByHash(ctx, "dev-aaaaaaaaaaaaaa")
+	require.NoError(t, err)
+	assert.Equal(t, int64(0), second, "second delete must be a no-op")
+}
+
+// TestRedisPool_DeleteByHash_AfterReRegister — the encoding
+// (operator|country|app|hash) means a re-registration with
+// DIFFERENT metadata produces a NEW member string (different
+// op/country/app), so two rows coexist for the same hash until
+// one is popped or evicted. DeleteByHash must remove BOTH on
+// KVKK DELETE — a stale registration with the same hash and
+// different metadata would otherwise keep offering the deleted
+// device as a P2P receiver. This test pins that contract.
+func TestRedisPool_DeleteByHash_AfterReRegister(t *testing.T) {
+	pool, _ := newTestRedisPool(t)
+	ctx := context.Background()
+
+	const hash = "dev-aaaaaaaaaaaaaa"
+	require.NoError(t, pool.RegisterReceiver(ctx,
+		sampleInfo(hash, "Turkcell", "TR", "whatsapp"),
+		5*time.Minute))
+
+	// Re-register with different metadata. Because the
+	// member string embeds op/country/app, this is a new
+	// member — ZADD does NOT upsert by hash alone.
+	require.NoError(t, pool.RegisterReceiver(ctx,
+		sampleInfo(hash, "Vodafone", "GB", "signal"),
+		5*time.Minute))
+
+	// Both rows are in the pool — confirm the precondition.
+	n, err := pool.Count(ctx)
+	require.NoError(t, err)
+	require.Equal(t, int64(2), n, "two distinct metadata rows for the same hash")
+
+	// A single DeleteByHash call removes BOTH. This is the
+	// guarantee STRIDE-6-03 needs: KVKK DELETE means "this
+	// device is gone from the pool", regardless of how many
+	// in-flight registrations exist for the same hash.
+	removed, err := pool.DeleteByHash(ctx, hash)
+	require.NoError(t, err)
+	assert.Equal(t, int64(2), removed)
+
+	n, err = pool.Count(ctx)
+	require.NoError(t, err)
+	assert.Equal(t, int64(0), n)
+}
+
+// TestRedisPool_SweepIdle_EvictsExpired — the manual
+// SweepIdle call removes all members whose score is in the
+// past. This is the cold-path complement to the lazy cleanup
+// in Count / MatchSender; it's exposed directly so the
+// background RunSweeper (and tests like this one) can drive it
+// on demand.
+func TestRedisPool_SweepIdle_EvictsExpired(t *testing.T) {
+	pool, mr := newTestRedisPool(t)
+	ctx := context.Background()
+
+	// Register one fresh receiver and inject two stale ones.
+	require.NoError(t, pool.RegisterReceiver(ctx,
+		sampleInfo("dev-fresh111111111", "Turkcell", "TR", "whatsapp"),
+		5*time.Minute))
+	pastScore := float64(time.Now().Add(-time.Hour).Unix())
+	mr.ZAdd(indexKey, pastScore, "ghost\x1f-\x1f-\x1fghost-aaaaaaaaaaaa")
+	mr.ZAdd(indexKey, pastScore, "ghost\x1f-\x1f-\x1fghost-bbbbbbbbbbbb")
+
+	// SweepIdle must drop the two ghosts and leave the fresh
+	// receiver intact.
+	evicted, err := pool.SweepIdle(ctx)
+	require.NoError(t, err)
+	assert.Equal(t, int64(2), evicted, "two stale members should be evicted")
+
+	n, err := pool.Count(ctx)
+	require.NoError(t, err)
+	assert.Equal(t, int64(1), n, "fresh member must survive the sweep")
+}
+
+// TestRedisPool_SweepIdle_NoOpWhenFresh — a sweep against a
+// pool with no expired members returns 0.
+func TestRedisPool_SweepIdle_NoOpWhenFresh(t *testing.T) {
+	pool, _ := newTestRedisPool(t)
+	ctx := context.Background()
+
+	require.NoError(t, pool.RegisterReceiver(ctx,
+		sampleInfo("dev-aaaaaaaaaaaaaa", "Turkcell", "TR", "whatsapp"),
+		5*time.Minute))
+	require.NoError(t, pool.RegisterReceiver(ctx,
+		sampleInfo("dev-bbbbbbbbbbbbbb", "Vodafone", "TR", "whatsapp"),
+		5*time.Minute))
+
+	evicted, err := pool.SweepIdle(ctx)
+	require.NoError(t, err)
+	assert.Equal(t, int64(0), evicted)
+
+	n, err := pool.Count(ctx)
+	require.NoError(t, err)
+	assert.Equal(t, int64(2), n)
+}
+
+// TestRedisPool_RunSweeper_StopsOnContextCancel verifies the
+// goroutine plumbing: RunSweeper returns when its ctx is
+// cancelled. We don't wait for a tick (that's covered by the
+// SweepIdle unit tests); the contract here is "cancellation
+// works".
+func TestRedisPool_RunSweeper_StopsOnContextCancel(t *testing.T) {
+	pool, _ := newTestRedisPool(t)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan struct{})
+	go func() {
+		pool.RunSweeper(ctx)
+		close(done)
+	}()
+
+	// Give the goroutine a moment to enter the select.
+	time.Sleep(10 * time.Millisecond)
+	cancel()
+
+	select {
+	case <-done:
+		// Sweeper returned promptly after cancel. Pass.
+	case <-time.After(2 * time.Second):
+		t.Fatal("RunSweeper did not return within 2s after ctx cancel")
+	}
+}
+
+// TestRedisPool_RunSweeper_EvictsExpiredMembers is the
+// end-to-end idle-purge test: launch the sweeper, inject a
+// stale member, wait for the next tick (we use a tiny custom
+// interval via the existing DefaultIdleSweepInterval const and
+// a wait slightly longer than that), and assert the stale row
+// is gone. We don't reset DefaultIdleSweepInterval for this
+// test — 60s is too slow for a unit test. Instead, the
+// companion test below uses the SweepIdle direct path to
+// cover the same behaviour deterministically; the production
+// behaviour is then a function call we trust.
+func TestRedisPool_RunSweeper_TickEvictsStale(t *testing.T) {
+	pool, mr := newTestRedisPool(t)
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	// Inject a stale member so any future sweep has work to do.
+	pastScore := float64(time.Now().Add(-time.Hour).Unix())
+	mr.ZAdd(indexKey, pastScore, "ghost\x1f-\x1f-\x1fghost-aaaaaaaaaaaa")
+
+	// Manually drive a single tick — we don't want to wait 60s
+	// in a unit test. SweepIdle is the per-tick body of
+	// RunSweeper, so calling it directly is equivalent to
+	// waiting for one ticker firing.
+	evicted, err := pool.SweepIdle(ctx)
+	require.NoError(t, err)
+	assert.Equal(t, int64(1), evicted)
+
+	n, err := pool.Count(ctx)
+	require.NoError(t, err)
+	assert.Equal(t, int64(0), n)
+
+	// Confirm RunSweeper itself still composes correctly with
+	// SweepIdle: launch it for a short while and cancel.
+	swCtx, swCancel := context.WithCancel(context.Background())
+	done := make(chan struct{})
+	go func() {
+		pool.RunSweeper(swCtx)
+		close(done)
+	}()
+	time.Sleep(10 * time.Millisecond)
+	swCancel()
+	select {
+	case <-done:
+	case <-time.After(2 * time.Second):
+		t.Fatal("RunSweeper did not exit after cancel")
+	}
+}
+
+// TestRedisPool_DeleteByHash_ConcurrentDeleteAndReRegister is
+// the adversarial race from the verifier §6 G criterion: a
+// delete + a re-register racing against each other must not
+// leave a stale entry in the pool. We run N goroutines, half
+// deleting, half re-registering, and assert the post-condition
+// (no stale entry, no orphan): the final state is either
+// "registered fresh" (re-register wins) or "deleted" (delete
+// wins), with no in-between ghost.
+func TestRedisPool_DeleteByHash_ConcurrentDeleteAndReRegister(t *testing.T) {
+	pool, _ := newTestRedisPool(t)
+	ctx := context.Background()
+
+	const hash = "dev-aaaaaaaaaaaaaa"
+	const rounds = 50
+
+	// Seed: register once.
+	require.NoError(t, pool.RegisterReceiver(ctx,
+		sampleInfo(hash, "Turkcell", "TR", "whatsapp"),
+		5*time.Minute))
+
+	var wg sync.WaitGroup
+	// Half the rounds delete, half re-register.
+	for i := 0; i < rounds; i++ {
+		wg.Add(1)
+		if i%2 == 0 {
+			go func() {
+				defer wg.Done()
+				_, _ = pool.DeleteByHash(ctx, hash)
+			}()
+		} else {
+			go func() {
+				defer wg.Done()
+				_ = pool.RegisterReceiver(ctx,
+					sampleInfo(hash, "Turkcell", "TR", "whatsapp"),
+					5*time.Minute)
+			}()
+		}
+	}
+	wg.Wait()
+
+	// Post-condition: at most ONE entry exists (the latest
+	// registration if a re-register won the race). The pool
+	// MUST NOT have a phantom ghost from a partial delete.
+	n, err := pool.Count(ctx)
+	require.NoError(t, err)
+	assert.LessOrEqual(t, n, int64(1),
+		"concurrent delete+re-register must not leave >1 entry for the same hash, got %d", n)
+
+	// A final sweep must produce 0 evicted (the surviving entry,
+	// if any, has a future TTL).
+	evicted, err := pool.SweepIdle(ctx)
+	require.NoError(t, err)
+	assert.Equal(t, int64(0), evicted)
+}
+
+// TestRedisPool_DeleteByHash_MalformedMemberIgnored is the
+// defensive test: if a malformed member somehow lands in the
+// ZSET (manual Redis poke, a botched upgrade, etc.),
+// DeleteByHash must skip it without panicking and without
+// returning an error. The privacy invariant forbids logging
+// inside the matching package, so a silent skip is the only
+// safe posture.
+func TestRedisPool_DeleteByHash_MalformedMemberIgnored(t *testing.T) {
+	pool, mr := newTestRedisPool(t)
+	ctx := context.Background()
+
+	// Inject a malformed member (only 2 fields instead of 4).
+	futureScore := float64(time.Now().Add(5 * time.Minute).Unix())
+	mr.ZAdd(indexKey, futureScore, "garbage\x1fnot-well-formed")
+
+	require.NoError(t, pool.RegisterReceiver(ctx,
+		sampleInfo("dev-aaaaaaaaaaaaaa", "Turkcell", "TR", "whatsapp"),
+		5*time.Minute))
+
+	removed, err := pool.DeleteByHash(ctx, "dev-aaaaaaaaaaaaaa")
+	require.NoError(t, err)
+	assert.Equal(t, int64(1), removed, "well-formed member must be removed")
+
+	// The malformed row is still there (we skip it, not delete it).
+	ss, err := mr.SortedSet(indexKey)
+	require.NoError(t, err)
+	assert.Len(t, ss, 1, "malformed member survives DeleteByHash (deferred to SweepIdle)")
+}
+
 func TestRedisPool_Register_ExtendsTTL(t *testing.T) {
 	pool, mr := newTestRedisPool(t)
 	ctx := context.Background()

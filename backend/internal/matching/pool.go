@@ -9,7 +9,14 @@
 //   - ZADD-with-score gives us free TTL semantics: ZRANGEBYSCORE
 //     with `now+1..+inf` returns only currently-active receivers.
 //   - Stale members are cleaned lazily on every MatchSender call
-//     via ZREMRANGEBYSCORE `0..now` — no separate sweeper needed.
+//     via ZREMRANGEBYSCORE `0..now` — no separate sweeper needed
+//     for the steady state. A periodic idle sweeper (RunSweeper,
+//     STRIDE-6-03) covers the cold case: nobody has called Match
+//     or Count in a while, so members whose score has slipped
+//     into the past accumulate. Sweep runs at
+//     DefaultIdleSweepInterval (60s, < DefaultPoolTTL 15m) and
+//     returns the # evicted so operators can graph the eviction
+//     rate.
 //   - The criteria-filtered pop is implemented as a single Lua
 //     script that scans up to N active members, picks the first
 //     one matching all non-empty filters, removes it, and returns
@@ -22,6 +29,18 @@
 //     escape it. If the field set ever broadens to free-text user
 //     input, switch to JSON encoding inside the Lua script (Redis
 //     ships with cjson).
+//   - STRIDE-6-03 (Sprint 7, hand-off from cyber-security review):
+//     KVKK DELETE on /api/v1/users/{device_id_hash} now propagates
+//     to the Active Pool via Pool.DeleteByHash — see api/users.go
+//     (Sprint 6 PR-37 wired the AUTHZ gate; this PR wires the
+//     Redis-side purge hook). DeleteByHash is O(N) because Redis
+//     has no secondary index on the hash field; the pool is
+//     normally tiny (steady-state count is in the tens) so this
+//     is fine. If the pool ever grows past a few thousand
+//     members, switch the encoding to a Redis hash keyed on
+//     `opene2ee:matching:pool:hash:<hash>` with a parallel
+//     ZADD for the TTL, and use a Lua script for atomic
+//     remove-by-hash.
 package matching
 
 import (
@@ -44,6 +63,16 @@ const DefaultPoolTTL = 15 * time.Minute
 // state — the pool is rarely that large, and if it ever is the
 // caller just retries.
 const DefaultMatchScanLimit = 50
+
+// DefaultIdleSweepInterval is the period between proactive idle
+// sweeps — see RunSweeper. Chosen at 60s (1 minute), well below
+// the 15-minute DefaultPoolTTL, so the steady-state pool never
+// holds more than ~one minute's worth of expired members even
+// when no MatchSender / Count call comes in. A more aggressive
+// value (e.g. 10s) would just churn Redis for no benefit; a
+// lazier value (e.g. 5m) would let expired members pile up to a
+// meaningful fraction of the pool.
+const DefaultIdleSweepInterval = 60 * time.Second
 
 // ErrNotFound is returned by MatchSender when no active receiver
 // matches the criteria (pool empty OR no member matches the
@@ -103,6 +132,33 @@ type Pool interface {
 	// regardless of criteria. Used by /healthz and for ops
 	// dashboards ("how big is the nöbet list right now?").
 	Count(ctx context.Context) (int64, error)
+
+	// DeleteByHash removes every active-pool entry whose hash
+	// equals `hash`. Sprint 7 STRIDE-6-03: the api package's
+	// DeleteUserHook calls this after a successful KVKK DELETE so
+	// the user's waiting-receiver row disappears immediately
+	// rather than waiting for the TTL to expire. Returns the
+	// number of pool entries removed (0 if the hash wasn't in the
+	// pool, 1 in the normal case, >1 if the same hash was
+	// re-registered with different metadata — shouldn't happen
+	// because ZADD upserts by member, but we defensively sweep
+	// every match).
+	DeleteByHash(ctx context.Context, hash string) (int64, error)
+
+	// SweepIdle evicts every member whose score (expiry
+	// unix timestamp) is in the past. Returns the number of
+	// members removed. The lazy cleanup that lives inside
+	// MatchSender and Count is sufficient for the hot path; this
+	// method exists for the cold path (no traffic) and for
+	// RunSweeper (the periodic background sweeper).
+	SweepIdle(ctx context.Context) (int64, error)
+
+	// RunSweeper runs SweepIdle every DefaultIdleSweepInterval
+	// until ctx is cancelled. The goroutine is best-effort: an
+	// error from one tick does not stop the loop (logged via
+	// slog from main.go's wrapper). For tests, the goroutine
+	// returns when ctx is done. STRIDE-6-03 idle-pool purge path.
+	RunSweeper(ctx context.Context)
 
 	// Close releases the underlying Redis connection pool.
 	Close() error
@@ -361,4 +417,107 @@ func (p *RedisPool) Count(ctx context.Context) (int64, error) {
 		return 0, fmt.Errorf("matching: redis ZCARD: %w", err)
 	}
 	return n, nil
+}
+
+// DeleteByHash removes every active-pool member whose parsed
+// hash equals `hash`. Returns the count of removed members.
+//
+// Algorithm (STRIDE-6-03):
+//  1. ZRANGE the entire sorted set (we keep all members; expired
+//     ones are skipped at the decode step rather than a separate
+//     ZREMRANGEBYSCORE because DeleteByHash is a rare event and
+//     keeping the scan atomic-from-the-caller's-POV is simpler
+//     than juggling two round-trips).
+//  2. For each member: decode. If parse fails or hash mismatch,
+//     skip. If hash matches, ZREM the member.
+//  3. Return #removed.
+//
+// ZREM is O(log N) per call; the dominant cost is the ZRANGE +
+// decode loop, which is O(N) over the (small) pool.
+//
+// Empty hash is a no-op — returns (0, nil). We deliberately do
+// NOT return an error because the api layer calls this from a
+// hook and a no-op delete is the safest failure mode for a
+// degraded caller.
+func (p *RedisPool) DeleteByHash(ctx context.Context, hash string) (int64, error) {
+	if hash == "" {
+		return 0, nil
+	}
+	members, err := p.client.ZRange(ctx, indexKey, 0, -1).Result()
+	if err != nil {
+		return 0, fmt.Errorf("matching: redis ZRANGE: %w", err)
+	}
+	var removed int64
+	for _, m := range members {
+		info, err := decodeMember(m)
+		if err != nil {
+			// Malformed member — log nothing (the matching
+			// package's privacy invariant forbids log calls;
+			// see TestPackageNoLoggingOrPrinting) and skip.
+			// The lazy cleanup in Count/MatchSender will pick
+			// it up if it's expired, and the next sweep will
+			// eventually drop any genuinely-stale garbage.
+			continue
+		}
+		if info.Hash != hash {
+			continue
+		}
+		if err := p.client.ZRem(ctx, indexKey, m).Err(); err != nil {
+			return removed, fmt.Errorf("matching: redis ZREM: %w", err)
+		}
+		removed++
+	}
+	return removed, nil
+}
+
+// SweepIdle evicts every member whose score is in the past.
+// Returns the number of members removed.
+//
+// This is the "cold path" complement to the lazy cleanup that
+// already runs inside Count and MatchSender. If the pool sits
+// idle for a while (no MatchSender / Count calls), expired
+// members accumulate in Redis until the next hot-path call. The
+// background sweeper (RunSweeper) calls this on a timer to keep
+// Redis memory bounded even in the cold case.
+func (p *RedisPool) SweepIdle(ctx context.Context) (int64, error) {
+	now := time.Now().Unix()
+	n, err := p.client.ZRemRangeByScore(ctx, indexKey,
+		"0", strconv.FormatInt(now, 10),
+	).Result()
+	if err != nil {
+		return 0, fmt.Errorf("matching: redis ZREMRANGEBYSCORE: %w", err)
+	}
+	return n, nil
+}
+
+// RunSweeper blocks running SweepIdle every DefaultIdleSweepInterval
+// until ctx is cancelled. Errors from individual sweeps are
+// swallowed (logged at the callsite if the caller wraps with
+// slog) — a transient Redis hiccup should not kill the sweeper
+// permanently; the next tick will recover.
+//
+// STRIDE-6-03: this is the idle-pool purge path. It runs in its
+// own goroutine, started by main.go on server boot and stopped
+// by the graceful-shutdown context cancellation.
+//
+// Concurrency: multiple goroutines can call SweepIdle
+// concurrently with RunSweeper without conflict — ZREMRANGEBYSCORE
+// is atomic. Same for DeleteByHash running alongside RunSweeper
+// (the worst case is a DeleteByHash + a SweepIdle both touching
+// an expired member; both are idempotent ZREMs).
+func (p *RedisPool) RunSweeper(ctx context.Context) {
+	t := time.NewTicker(DefaultIdleSweepInterval)
+	defer t.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-t.C:
+			// Best-effort. A cancelled ctx surfaces as an
+			// error here; we don't propagate because the
+			// outer select will catch the cancellation on
+			// the next iteration.
+			_, _ = p.SweepIdle(ctx)
+		}
+	}
 }

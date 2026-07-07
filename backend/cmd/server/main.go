@@ -60,6 +60,7 @@ import (
 	"time"
 
 	"github.com/opene2ee-com/e2ee-app/backend/internal/api"
+	"github.com/opene2ee-com/e2ee-app/backend/internal/matching"
 	"github.com/opene2ee-com/e2ee-app/backend/internal/operator"
 	"github.com/opene2ee-com/e2ee-app/backend/internal/storage"
 )
@@ -536,6 +537,28 @@ func main() {
 	}()
 	logger.Info("redis connected")
 
+	// Active Pool (matching package) — separate Redis client because
+	// the sorted-set schema + Lua-script semantics are tightly
+	// coupled (see matching/pool.go package doc). Sprint 7 STRIDE-6-03:
+	// this client's DeleteByHash is wired into api.Config.DeleteUserHook
+	// so KVKK DELETE on /api/v1/users/{hash} also removes the device
+	// from the waiting-receiver pool. The pool's RunSweeper is also
+	// started here as a background goroutine and stopped on
+	// graceful shutdown (via sweeperCtx cancellation).
+	pool, err := matching.NewRedisPool(startupCtx, cfg.RedisAddr, cfg.RedisPassword)
+	if err != nil {
+		logger.Error("matching pool dial failed", "err", err)
+		os.Exit(1)
+	}
+	defer func() {
+		if cerr := pool.Close(); cerr != nil {
+			logger.Warn("matching pool close error", "err", cerr)
+		}
+	}()
+	logger.Info("matching pool ready",
+		"sweep_interval", matching.DefaultIdleSweepInterval.String(),
+	)
+
 	// Operator Tespit Servisi. Cache is the in-process NoopCache
 	// for Sprint 1 (the operator cache layer is wired and tested in
 	// PR-3, but a cross-process Redis cache means another moving
@@ -579,17 +602,40 @@ func main() {
 		// middleware. MUST match Kong's JWT_SECRET (see
 		// infra/kong/kong.yml + infra/docker-compose.yml).
 		JWTSecret: cfg.JWTSecret,
-		// DeleteUserHook intentionally omitted in Sprint 1 — the
-		// Active Pool purge for KVKK deletes will be added once
-		// the matching package exposes a DeleteByHash on its
-		// Redis-backed pool. Until then, the relational delete is
-		// sufficient (the device can't authenticate any more
-		// anyway because its public_key row is gone).
+		// Sprint 7 STRIDE-6-03: KVKK DELETE on
+		// /api/v1/users/{device_id_hash} (Sprint 6 PR-37 AUTHZ
+		// gate) now also purges the device's waiting-receiver row
+		// from the Active Pool via matching.RedisPool.DeleteByHash.
+		// The hook returns nil on success and surfaces errors via
+		// the api users.go warn log (see handleDeleteUser) — the
+		// hook failure does NOT roll back the relational delete
+		// (KVKK / GDPR Art. 17 demands hard-deletion regardless of
+		// Redis health; the 7-day SLA is upheld by the next
+		// matching.DefaultIdleSweepInterval idle sweep tick).
+		DeleteUserHook: func(ctx context.Context, deviceIDHash string) error {
+			removed, err := pool.DeleteByHash(ctx, deviceIDHash)
+			if err != nil {
+				return err
+			}
+			if removed == 0 {
+				logger.Debug("delete-user pool purge: hash not in pool",
+					"err_kind", "pool",
+				)
+			}
+			return nil
+		},
 	})
 	if err != nil {
 		logger.Error("api init failed", "err", err)
 		os.Exit(1)
 	}
+
+	// Start the idle-pool sweeper (STRIDE-6-03). The pool's own
+	// RunSweeper is a blocking call — run it in a goroutine and
+	// stop it on shutdown via sweeperCtx.
+	sweeperCtx, cancelSweeper := context.WithCancel(context.Background())
+	defer cancelSweeper()
+	go pool.RunSweeper(sweeperCtx)
 
 	// Compose the HTTP handler tree. We mount the chi router ONLY
 	// under /api/v1/ so we can attach our own /healthz to the
