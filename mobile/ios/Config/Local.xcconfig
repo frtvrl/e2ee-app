@@ -1,0 +1,41 @@
+// mobile/ios/Config/Local.xcconfig
+//
+// PR-Sprint7-Item-13 (MOB-6) — Local (dev / debug) build configuration.
+//
+// This file is wired in via `baseConfigurationReference` on the Debug
+// build configurations in `Runner.xcodeproj/project.pbxproj`. It holds
+// per-environment build settings that must NOT ship to App Store / Test
+// Flight distribution builds.
+//
+// Design notes
+// ------------
+// * `TEAMS_IDENTIFIER` is intentionally empty: simulator + dev builds do
+//   not require a real Apple Developer Team ID for code signing (Xcode
+//   falls back to "Sign to Run Locally"). An empty value here keeps the
+//   local dev loop friction-free and ensures we never accidentally embed
+//   a production team ID in a debug build that an attacker could
+//   reverse-engineer (defence-in-depth alongside §A anonymisation).
+// * The matching Release xcconfig (`Production.xcconfig`) carries the
+//   real team ID. See `docs/SETUP-iOS.md` for the procedure to populate
+//   it from App Store Connect.
+// * `DEVELOPMENT_TEAM = $(TEAMS_IDENTIFIER)` in the project file (H3-H8)
+//   picks up the empty value here so dev builds skip team-based signing.
+// * Xcode does NOT auto-substitute `$(...)` strings in `.entitlements`
+//   files. The literal `$(TEAMS_IDENTIFIER)` placeholder in
+//   `Runner/Runner.entitlements` and
+//   `NetworkExtension/OpenE2eeTunnelProvider.entitlements` therefore
+//   requires either a build-phase substitution script (recommended for
+//   CI) or manual replacement before the very first App Store upload.
+//   The Local config empty value means dev builds still sign cleanly
+//   even when the literal placeholder remains in the entitlements file.
+//
+// Pre-flight (from ios-native-bridging.md)
+// ----------------------------------------
+// Verify before changing `baseConfigurationReference`:
+//   * This file is referenced by PBXFileReference UUID B8 in pbxproj.
+//   * It is the base config for XCBuildConfiguration entries H3, H5,
+//     H7, H8 (Debug + RunnerTests Release). The H4 + H6 Release
+//     configurations point at `Production.xcconfig` instead.
+
+TEAMS_IDENTIFIER =
+OPENE2EE_BUILD_ENVIRONMENT = local
