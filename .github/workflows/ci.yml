@@ -14,15 +14,25 @@ jobs:
   # ============================================================================
   # Multi-OS matrix — Sprint 3 PR-MP-CI
   # ----------------------------------------------------------------------------
-  # Per-OS coverage (ADR-0008 / SPRINT-3-SCOPE §5):
+  # Per-OS coverage (ADR-0008 / SPRINT-3-SCOPE §5 / docs/CI-MATRIX.md):
   #   1. Go build + test         — 3 OSes (ubuntu + macos + windows)
   #   2. Flutter analyze + test  — 3 OSes
   #   3. Docker compose config   — 2 OSes (Linux + macOS; Windows skip —
-  #                                 bash anchors + POSIX secret paths)
+  #                                 see docker-compose-config job below
+  #                                 for the explicit STRIDE-8-02 NOTICE)
   #   4. Privacy spot-check      — 3 OSes (KVKK DELETE handler +
   #                                 privacy invariant tests)
   #
   # Total matrix fan-out: 11 legs (3+3+2+3) per workflow run.
+  #
+  # Windows docker skip — Sprint 7 STRIDE-8-02:
+  #   All docker-touching jobs in this workflow (docker-compose-config,
+  #   backend-build) are EXPLICITLY Windows-skipped. Rationale is
+  #   documented inline at each job AND in docs/CI-MATRIX.md §"Windows
+  #   docker skip rationale". DO NOT re-add windows-latest to either
+  #   matrix without first updating the CI-MATRIX doc and consulting
+  #   Docker Desktop limitations (https://docs.docker.com/desktop/why/
+  #   #limitations-of-docker-for-windows).
   # ============================================================================
 
   go-build-test:
@@ -154,10 +164,37 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        # Windows intentionally skipped — infra/docker-compose.yml
-        # uses bash anchors (<<: *default-restart) and POSIX-style
-        # secret file paths (../.secrets/...) that don't translate.
-        # See SPRINT-3-SCOPE §5.
+        # ----------------------------------------------------------------
+        # NOTICE — Sprint 7 STRIDE-8-02 (Windows docker skip):
+        #   windows-latest is INTENTIONALLY omitted from this matrix.
+        #
+        #   Why Windows is skipped:
+        #     (a) infra/docker-compose.yml uses YAML anchors that Docker
+        #         Compose for Windows handles, but the canonical
+        #         `docker compose config` runtime dereferences POSIX-style
+        #         secret file paths (`file: ../.secrets/<name>.txt` —
+        #         L104-L110 of infra/docker-compose.yml) that fail
+        #         Windows path translation. The pure-Python validator
+        #         (`infra/scripts/validate_compose.py`) used in CI is
+        #         OS-agnostic and would run fine on Windows, but the
+        #         operational truth is that the real `docker compose
+        #         config` invocation a developer would run locally is
+        #         NOT reproducible on Windows without WSL.
+        #     (b) Docker Desktop on Windows requires WSL 2 or Hyper-V
+        #         and runs in a Linux VM — CI validation on
+        #         ubuntu-latest + macos-latest is sufficient because
+        #         both are native Linux/macOS Docker runtimes that
+        #         match the production deployment target.
+        #
+        #   Manual docker verify on Windows:
+        #     Developers on Windows who need to validate the compose
+        #     stack MUST run from WSL 2 (see docs/MULTIPLATFORM.md §2.2).
+        #     Git Bash alone is NOT sufficient — Docker Desktop's WSL
+        #     integration is the only path that gives Linux-equivalent
+        #     compose semantics.
+        #
+        #   See: docs/CI-MATRIX.md §"Windows docker skip rationale".
+        # ----------------------------------------------------------------
         os: [ubuntu-latest, macos-latest]
     steps:
       - name: Checkout
@@ -509,6 +546,26 @@ jobs:
 
   backend-build:
     name: Backend — docker build
+    # ----------------------------------------------------------------
+    # NOTICE — Sprint 7 STRIDE-8-02 (Linux-only docker build):
+    #   This job is HARD-PINNED to ubuntu-latest because backend
+    #   Docker buildx invocation requires a Linux-compatible Docker
+    #   daemon. GitHub-hosted Windows runners run Docker Desktop
+    #   inside a WSL2-backed VM with a different BuildKit cache and
+    #   overlay-driver profile; macOS runners use Docker Desktop's
+    #   xhyve-based VM with separate cache scope. Building only on
+    #   ubuntu-latest keeps the GHA cache layer (`cache-from:
+    #   type=gha`) deterministic and matches the production target
+    #   (Linux containers behind Kong/Nginx — see
+    #   infra/docker-compose.yml services).
+    #
+    #   Re-adding a multi-OS build matrix here would NOT add signal
+    #   — backend Dockerfile is debian-slim only (no Windows- or
+    #   macOS-specific stages), so the only thing a multi-OS matrix
+    #   would exercise is Docker Desktop itself, not our code.
+    #
+    #   See: docs/CI-MATRIX.md §"Windows docker skip rationale".
+    # ----------------------------------------------------------------
     runs-on: ubuntu-latest
     defaults:
       run:
