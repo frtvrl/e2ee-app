@@ -76,6 +76,19 @@ dependencies:
   # 1.5.2 — see notes/ADR pinned at Sprint 7 PR-41.
   flutter_webrtc: ^1.5.2
 
+  # PR-S9.6.8 — app shell wiring (Sprint 9.6.8, the first app-shell
+  # sprint after 7 CI/toolchain-only sprints in the 9.6.x chain).
+  # Pinned to ^2.5.1 / ^14.2.7 (major.minor only, matching the
+  # existing pin style in this file — patch updates are picked up
+  # automatically by `flutter pub upgrade`). See:
+  #   * lib/main.dart — `ProviderScope` wrapping `MyApp`.
+  #   * lib/app.dart — `MaterialApp.router` + theme.
+  #   * lib/router/app_router.dart — `go_router` 5-route table.
+  # Audit S7 (`tools/workflow-yaml-audit.py` check_mobile_entry_point_v4)
+  # enforces these two deps are present in this file.
+  flutter_riverpod: ^2.5.1
+  go_router: ^14.2.7
+
 dev_dependencies:
   flutter_test:
     sdk: flutter

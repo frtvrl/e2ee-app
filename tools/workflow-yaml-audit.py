@@ -627,6 +627,117 @@ def check_android_debug_workflow_v3() -> list[str]:
     return findings
 
 
+def check_mobile_entry_point_v4() -> list[str]:
+    """Sprint 9.6.8 v4: mobile app entry point check (S7).
+
+    A live workflow_dispatch run AFTER Sprint 9.6.7 merge
+    (commit bbf7087) FAILED because `flutter build apk` could not
+    find `mobile/lib/main.dart` — the Flutter mobile default entry
+    point. The repo had `mobile/lib/web/main.dart` (for the web
+    dashboard) but no `mobile/lib/main.dart` (for the mobile build).
+    The `flutter pub get` step from Sprint 9.6.7 succeeded (it
+    resolves the package graph), but the build still failed at
+    `:app:compileFlutterBuildDebug` with "could not find main entry
+    point".
+
+    This sprint (9.6.8) creates the entry point + the full app
+    shell. The audit must verify all three preconditions for a
+    buildable mobile app:
+
+      (a) `mobile/lib/main.dart` exists (the entry point).
+      (b) The file has `runApp(` (calls runApp) AND
+          `ProviderScope` (Riverpod wiring). A comment claiming
+          "we run Riverpod" must NOT pass — the check uses
+          `pathlib` + content read (substrings on the actual
+          file content).
+      (c) `mobile/pubspec.yaml` declares BOTH `flutter_riverpod:`
+          AND `go_router:` as dependencies. Parsed via PyYAML
+          (not substring) so a comment claiming "we use Riverpod"
+          in the pubspec must NOT pass.
+
+    Failure messages name the missing condition so a future
+    regression is debuggable.
+    """
+    findings = []
+    main_dart = REPO_ROOT / "mobile" / "lib" / "main.dart"
+    pubspec = REPO_ROOT / "mobile" / "pubspec.yaml"
+
+    # (a) entry point exists
+    if not main_dart.exists():
+        findings.append(
+            "S7 mobile/lib/main.dart: file missing (Sprint 9.6.8 fix — "
+            "Flutter mobile build entry point does not exist; live "
+            "workflow_dispatch run after Sprint 9.6.7 PR #19 merge "
+            "(commit bbf7087) FAILED at :app:compileFlutterBuildDebug "
+            "with 'could not find main entry point' because only "
+            "mobile/lib/web/main.dart exists, not mobile/lib/main.dart). "
+            "Create the file with at least:\n"
+            "      import 'package:flutter/material.dart';\n"
+            "      import 'package:flutter_riverpod/flutter_riverpod.dart';\n"
+            "      void main() { runApp(const ProviderScope(child: MyApp())); }"
+        )
+        return findings  # Cannot check (b) if main.dart is missing.
+
+    # (b) main.dart has runApp( + ProviderScope (substring on actual content)
+    main_text = main_dart.read_text(encoding="utf-8")
+    if "runApp(" not in main_text:
+        findings.append(
+            "S7 mobile/lib/main.dart: does not call `runApp(` (Sprint 9.6.8 "
+            "fix — the entry point must invoke Flutter's runApp with a "
+            "widget tree; the audit checks the actual code, not a comment)"
+        )
+    if "ProviderScope" not in main_text:
+        findings.append(
+            "S7 mobile/lib/main.dart: does not wire `ProviderScope` (Sprint "
+            "9.6.8 fix — Riverpod state management requires ProviderScope "
+            "at the root of the widget tree; the audit checks the actual "
+            "code, not a comment)"
+        )
+
+    # (c) pubspec.yaml declares flutter_riverpod + go_router (parsed via PyYAML)
+    if not pubspec.exists():
+        findings.append(
+            "S7 mobile/pubspec.yaml: file missing (Sprint 9.6.8 invariant — "
+            "the dependencies for the new app shell must be declared)"
+        )
+        return findings
+    try:
+        with pubspec.open(encoding="utf-8") as f:
+            pubspec_doc = yaml.safe_load(f)
+    except yaml.YAMLError as e:
+        findings.append(
+            f"S7 mobile/pubspec.yaml: YAML parse failed ({e})"
+        )
+        return findings
+    if not isinstance(pubspec_doc, dict):
+        findings.append(
+            "S7 mobile/pubspec.yaml: top-level is not a mapping (parsed "
+            f"type: {type(pubspec_doc).__name__})"
+        )
+        return findings
+    deps = pubspec_doc.get("dependencies", {})
+    if not isinstance(deps, dict):
+        deps = {}
+    has_riverpod = "flutter_riverpod" in deps
+    has_go_router = "go_router" in deps
+    if not has_riverpod:
+        findings.append(
+            "S7 mobile/pubspec.yaml: `flutter_riverpod:` missing from "
+            "dependencies (Sprint 9.6.8 fix — state management is "
+            "required; the audit parses dependencies via PyYAML so a "
+            "comment claiming 'we use Riverpod' must NOT pass)"
+        )
+    if not has_go_router:
+        findings.append(
+            "S7 mobile/pubspec.yaml: `go_router:` missing from "
+            "dependencies (Sprint 9.6.8 fix — declarative routing is "
+            "required; the audit parses dependencies via PyYAML so a "
+            "comment claiming 'we use go_router' must NOT pass)"
+        )
+
+    return findings
+
+
 def main() -> int:
     all_findings = []
     for fname in TARGETS:
@@ -675,12 +786,19 @@ def main() -> int:
     else:
         print("PASS: android-debug.yml has `Install Flutter dependencies` step with working-directory=./mobile (Sprint 9.6.7 S6)")
 
+    # Sprint 9.6.8 v4: mobile entry point check (S7) — lib/main.dart + ProviderScope + pubspec deps.
+    s7_findings = check_mobile_entry_point_v4()
+    if s7_findings:
+        all_findings.extend(s7_findings)
+    else:
+        print("PASS: mobile entry point (lib/main.dart + runApp( + ProviderScope + pubspec flutter_riverpod + go_router) — Sprint 9.6.8 S7)")
+
     if all_findings:
         print("\nFINDINGS:")
         for f in all_findings:
             print(f"  - {f}")
         return 1
-    print("\nALL 4 WORKFLOWS + GRADLE WRAPPER + AGP + KOTLIN + SYNTAX v2 + S6 flutter pub get step PASS PyYAML AUDIT.")
+    print("\nALL 4 WORKFLOWS + GRADLE WRAPPER + AGP + KOTLIN + SYNTAX v2 + S6 flutter pub get step + S7 mobile entry point PASS PyYAML AUDIT.")
     return 0
 
 

@@ -1,18 +1,23 @@
-"""Self-test for check_app_build_gradle_syntax_v2 (S1-S5) and
-check_android_debug_workflow_v3 (S6).
+"""Self-test for check_app_build_gradle_syntax_v2 (S1-S5),
+check_android_debug_workflow_v3 (S6), and
+check_mobile_entry_point_v4 (S7).
 
 Per Architect brief (Sprint 9.6.6): "self-checks (negative test:
 revert + audit finds 4 FAIL)". Sprint 9.6.7 extends the self-test
-to cover S6 (4 new cases: 1 PASS, 3 FAIL).
+to cover S6 (4 new cases: 1 PASS, 3 FAIL). Sprint 9.6.8 extends
+further to cover S7 (4 new cases: 1 PASS, 3 FAIL).
 
 S1-S5 cases: 6 (1 PASS + 5 FAIL, each violating exactly one of the
 S1-S5 sub-checks for app/build.gradle.kts).
-
 S6 cases: 4 (1 PASS + 3 FAIL, each violating exactly one of the
 S6 conditions on android-debug.yml: name match, run contains
 "flutter pub get", working-directory == "./mobile").
+S7 cases: 4 (1 PASS + 3 FAIL, each violating exactly one of the
+S7 conditions: lib/main.dart exists, has runApp(, has
+ProviderScope, pubspec has flutter_riverpod:, pubspec has
+go_router:).
 
-Total: 10 cases.
+Total: 14 cases.
 """
 import sys
 from pathlib import Path
@@ -132,6 +137,45 @@ def run_s6_check(yaml_text: str) -> list[str]:
     else:
         if s6_match["working_directory"] != "./mobile":
             findings.append("S6 fail")
+    return findings
+
+
+def run_s7_check(main_dart_text: str | None, pubspec_text: str | None) -> list[str]:
+    """Replicate check_mobile_entry_point_v4 logic on raw text inputs.
+
+    Mirrors the audit's three-part S7 check:
+    (a) lib/main.dart exists (signalled by main_dart_text != None),
+    (b) main_dart has `runApp(` + `ProviderScope` (substring on text),
+    (c) pubspec.yaml has `flutter_riverpod:` + `go_router:` as
+        dependencies (parsed via PyYAML, not substring).
+    """
+    findings = []
+    if main_dart_text is None:
+        findings.append("S7 fail")
+        return findings
+    if "runApp(" not in main_dart_text:
+        findings.append("S7 fail")
+    if "ProviderScope" not in main_dart_text:
+        findings.append("S7 fail")
+    if pubspec_text is None:
+        findings.append("S7 fail")
+        return findings
+    import yaml
+    try:
+        pubspec_doc = yaml.safe_load(pubspec_text)
+    except Exception:
+        findings.append("S7 fail")
+        return findings
+    if not isinstance(pubspec_doc, dict):
+        findings.append("S7 fail")
+        return findings
+    deps = pubspec_doc.get("dependencies", {})
+    if not isinstance(deps, dict):
+        deps = {}
+    if "flutter_riverpod" not in deps:
+        findings.append("S7 fail")
+    if "go_router" not in deps:
+        findings.append("S7 fail")
     return findings
 
 
@@ -363,28 +407,91 @@ jobs:
 
 # ─── Run all cases ───────────────────────────────────────────────
 
+# ─── S7 test cases (Sprint 9.6.8) ────────────────────────────────
+
+# Case 10 (S7 PASS): main.dart + pubspec.yaml all in good shape.
+case_s7_main_pass = """
+import 'package:flutter/material.dart';
+import 'package:flutter_riverpod/flutter_riverpod.dart';
+import 'app.dart';
+
+void main() {
+  runApp(const ProviderScope(child: MyApp()));
+}
+"""
+case_s7_pubspec_pass = """
+name: opene2ee
+description: OpenE2EE
+version: 1.0.0+1
+environment:
+  sdk: ^3.12.1
+dependencies:
+  flutter:
+    sdk: flutter
+  cupertino_icons: ^1.0.8
+  flutter_riverpod: ^2.5.1
+  go_router: ^14.2.7
+dev_dependencies:
+  flutter_test:
+    sdk: flutter
+"""
+
+# Case 11 (S7 FAIL — main.dart missing): main_dart_text is None.
+case_s7_pubspec_main_missing = case_s7_pubspec_pass  # pubspec still good
+
+# Case 12 (S7 FAIL — ProviderScope missing): main.dart exists but no ProviderScope.
+case_s7_no_providerscope = """
+import 'package:flutter/material.dart';
+
+void main() {
+  runApp(const MyApp());
+}
+"""
+
+# Case 13 (S7 FAIL — pubspec deps missing): main.dart good but pubspec lacks flutter_riverpod.
+case_s7_main_good_no_riverpod = case_s7_main_pass
+case_s7_pubspec_no_riverpod = """
+name: opene2ee
+version: 1.0.0+1
+dependencies:
+  flutter:
+    sdk: flutter
+  go_router: ^14.2.7
+"""
+
+# ─── Run all cases ───────────────────────────────────────────────
+
 cases = [
     # S1-S5 cases (Sprint 9.6.6 — regression guard: must still pass)
-    ("PASS (Sprint 9.6.6 fixed file)", run_check, case_pass, []),
+    ("PASS (Sprint 9.6.6 fixed file)", run_check, (case_pass,), []),
     ("S1+S5 fail (Sprint 9.6.5 broken state: no real import + fully-qualified usage)",
-     run_check, case_s1_fail, ["S1 fail", "S5 fail"]),
-    ("S2 fail (missing JvmTarget import)", run_check, case_s2_fail, ["S2 fail"]),
-    ("S3 fail (deprecated kotlinOptions present)", run_check, case_s3_fail, ["S3 fail"]),
-    ("S4 fail (missing new kotlin compilerOptions block)", run_check, case_s4_fail, ["S4 fail"]),
-    ("S5 fail (fully-qualified java.util.Properties())", run_check, case_s5_fail, ["S5 fail"]),
-    # S6 cases (Sprint 9.6.7 — new)
+     run_check, (case_s1_fail,), ["S1 fail", "S5 fail"]),
+    ("S2 fail (missing JvmTarget import)", run_check, (case_s2_fail,), ["S2 fail"]),
+    ("S3 fail (deprecated kotlinOptions present)", run_check, (case_s3_fail,), ["S3 fail"]),
+    ("S4 fail (missing new kotlin compilerOptions block)", run_check, (case_s4_fail,), ["S4 fail"]),
+    ("S5 fail (fully-qualified java.util.Properties())", run_check, (case_s5_fail,), ["S5 fail"]),
+    # S6 cases (Sprint 9.6.7 — regression guard: must still pass)
     ("S6 PASS (Install Flutter dependencies step with working-directory=./mobile + flutter pub get)",
-     run_s6_check, case_s6_pass, []),
-    ("S6 FAIL (step missing entirely)", run_s6_check, case_s6_step_missing, ["S6 fail"]),
+     run_s6_check, (case_s6_pass,), []),
+    ("S6 FAIL (step missing entirely)", run_s6_check, (case_s6_step_missing,), ["S6 fail"]),
     ("S6 FAIL (working-directory=./mobile/android — wrong Dart project root)",
-     run_s6_check, case_s6_wrong_wd, ["S6 fail"]),
+     run_s6_check, (case_s6_wrong_wd,), ["S6 fail"]),
     ("S6 FAIL (run=echo hello — not flutter pub get)",
-     run_s6_check, case_s6_wrong_run, ["S6 fail"]),
+     run_s6_check, (case_s6_wrong_run,), ["S6 fail"]),
+    # S7 cases (Sprint 9.6.8 — new)
+    ("S7 PASS (lib/main.dart + runApp( + ProviderScope + pubspec flutter_riverpod + go_router)",
+     run_s7_check, (case_s7_main_pass, case_s7_pubspec_pass), []),
+    ("S7 FAIL (lib/main.dart missing entirely)", run_s7_check,
+     (None, case_s7_pubspec_main_missing), ["S7 fail"]),
+    ("S7 FAIL (lib/main.dart exists but no ProviderScope — only runApp())", run_s7_check,
+     (case_s7_no_providerscope, case_s7_pubspec_pass), ["S7 fail"]),
+    ("S7 FAIL (pubspec.yaml missing flutter_riverpod: dependency)", run_s7_check,
+     (case_s7_main_good_no_riverpod, case_s7_pubspec_no_riverpod), ["S7 fail"]),
 ]
 
 failed = []
-for name, check_fn, code, expected in cases:
-    actual = check_fn(code)
+for name, check_fn, args, expected in cases:
+    actual = check_fn(*args)
     ok = sorted(actual) == sorted(expected)
     status = "PASS" if ok else "FAIL"
     print(f"{status}: {name} — expected {expected}, got {actual}")
