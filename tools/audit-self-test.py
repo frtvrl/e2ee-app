@@ -1,11 +1,13 @@
 """Self-test for check_app_build_gradle_syntax_v2 (S1-S5),
-check_android_debug_workflow_v3 (S6), and
-check_mobile_entry_point_v4 (S7).
+check_android_debug_workflow_v3 (S6),
+check_mobile_entry_point_v4 (S7), and
+check_android_xml_comments_v5 (S8).
 
 Per Architect brief (Sprint 9.6.6): "self-checks (negative test:
 revert + audit finds 4 FAIL)". Sprint 9.6.7 extends the self-test
 to cover S6 (4 new cases: 1 PASS, 3 FAIL). Sprint 9.6.8 extends
-further to cover S7 (4 new cases: 1 PASS, 3 FAIL).
+further to cover S7 (4 new cases: 1 PASS, 3 FAIL). Sprint 9.6.9
+extends further to cover S8 (2 new cases: 1 PASS, 1 FAIL).
 
 S1-S5 cases: 6 (1 PASS + 5 FAIL, each violating exactly one of the
 S1-S5 sub-checks for app/build.gradle.kts).
@@ -16,8 +18,10 @@ S7 cases: 4 (1 PASS + 3 FAIL, each violating exactly one of the
 S7 conditions: lib/main.dart exists, has runApp(, has
 ProviderScope, pubspec has flutter_riverpod:, pubspec has
 go_router:).
+S8 cases: 2 (1 PASS + 1 FAIL — XML well-formed + no `--` inside
+`<!-- -->`).
 
-Total: 14 cases.
+Total: 16 cases.
 """
 import sys
 from pathlib import Path
@@ -176,6 +180,31 @@ def run_s7_check(main_dart_text: str | None, pubspec_text: str | None) -> list[s
         findings.append("S7 fail")
     if "go_router" not in deps:
         findings.append("S7 fail")
+    return findings
+
+
+def run_s8_check(xml_text: str | None) -> list[str]:
+    """Replicate check_android_xml_comments_v5 logic on raw XML text.
+
+    Mirrors the audit's two-part S8 check:
+    (a) XML parses via xml.etree.ElementTree (well-formedness),
+    (b) no `<!-- ... -->` comment body contains `--`.
+    """
+    findings = []
+    if xml_text is None:
+        findings.append("S8 fail")
+        return findings
+    import xml.etree.ElementTree as ET
+    try:
+        ET.fromstring(xml_text)
+    except Exception:
+        findings.append("S8 fail")
+        return findings
+    import re
+    for match in re.finditer(r"<!--(.*?)-->", xml_text, re.DOTALL):
+        if "--" in match.group(1):
+            findings.append("S8 fail")
+            return findings
     return findings
 
 
@@ -459,6 +488,70 @@ dependencies:
   go_router: ^14.2.7
 """
 
+# ─── S8 test cases (Sprint 9.6.9) ────────────────────────────────
+
+# Case 14 (S8 PASS): production network_security_config.xml after Sprint 9.6.9 fix.
+# Mirrors the post-fix state: only `=` runs in headers, no `--` inside comments.
+case_s8_xml_pass = """<?xml version="1.0" encoding="utf-8"?>
+<!--
+  mobile/android/app/src/main/res/xml/network_security_config.xml
+
+  PR-39 (Sprint 6) — Network Security Configuration for the OpenE2EE Android
+  app.
+
+  Why this exists
+  ===============
+  Addresses cyber-security Sprint 6 findings MOB-1 + MOB-2.
+
+  Trust anchors
+  =============
+  <trust-anchors> references ONLY system. User-installed CAs are NOT trusted.
+
+  Production CA pin
+  =================
+  A <domain-config> block pins the production CA's SPKI hash.
+
+  Dev exception
+  =============
+  The 10.0.2.2 cleartext allowance is currently COMMENTED OUT.
+-->
+<network-security-config>
+    <base-config cleartextTrafficPermitted="false">
+        <trust-anchors>
+            <certificates src="system" />
+        </trust-anchors>
+    </base-config>
+    <domain-config>
+        <domain includeSubdomains="true">api.opene2ee.com</domain>
+        <pin-set expiration="2027-07-07">
+            <pin digest="SHA-256">PLACEHOLDER_PRODUCTION_SPKI==</pin>
+        </pin-set>
+    </domain-config>
+</network-security-config>
+"""
+
+# Case 15 (S8 FAIL — comment with `--` run): the exact Sprint 9.6.9 broken state.
+case_s8_xml_bad = """<?xml version="1.0" encoding="utf-8"?>
+<!--
+  PR-39 — Network Security Configuration.
+
+  Why this exists
+  ---------------
+  Addresses cyber-security Sprint 6 findings.
+
+  Trust anchors
+  -------------
+  System-only.
+-->
+<network-security-config>
+    <base-config cleartextTrafficPermitted="false">
+        <trust-anchors>
+            <certificates src="system" />
+        </trust-anchors>
+    </base-config>
+</network-security-config>
+"""
+
 # ─── Run all cases ───────────────────────────────────────────────
 
 cases = [
@@ -487,6 +580,11 @@ cases = [
      (case_s7_no_providerscope, case_s7_pubspec_pass), ["S7 fail"]),
     ("S7 FAIL (pubspec.yaml missing flutter_riverpod: dependency)", run_s7_check,
      (case_s7_main_good_no_riverpod, case_s7_pubspec_no_riverpod), ["S7 fail"]),
+    # S8 cases (Sprint 9.6.9 — new)
+    ("S8 PASS (Android XML well-formed; no `--` inside `<!-- -->`)",
+     run_s8_check, (case_s8_xml_pass,), []),
+    ("S8 FAIL (comment contains `--` run — Sprint 9.6.9 broken state)",
+     run_s8_check, (case_s8_xml_bad,), ["S8 fail"]),
 ]
 
 failed = []

@@ -7,7 +7,7 @@
   `android:networkSecurityConfig="@xml/network_security_config"`.
 
   Why this exists
-  ---------------
+  ===============
   Addresses the cyber-security Sprint 6 review findings MOB-1 (High) +
   MOB-2 (Medium). MOB-1: `<application>` lacked an explicit
   `android:usesCleartextTraffic="false"` pin (Android 9+ default is `false`,
@@ -17,14 +17,14 @@
   user-installed CAs from intercepting traffic and pins the production CA.
 
   Trust anchors
-  -------------
+  =============
   `<trust-anchors>` references ONLY `system` — i.e. the Android system
   root store. User-installed CAs are NOT trusted for our app's traffic.
   This means Charles Proxy / mitmproxy user-installed CAs cannot intercept
   our traffic, closing the MITM-by-malicious-CA class of attack.
 
   Production CA pin
-  -----------------
+  =================
   A `<domain-config>` block pins the production CA's SPKI hash for
   `api.opene2ee.com` and `staging.opene2ee.com`. The SHA-256 hash below is
   a placeholder; **must be replaced** with the actual production CA's
@@ -32,7 +32,7 @@
   docs/SPRINT-6-PR-39-ROTATION.md (to be added in Sprint 7+).
 
   Dev exception
-  -------------
+  =============
   The `10.0.2.2` cleartext allowance (Android emulator host) is currently
   COMMENTED OUT. Enable it locally by uncommenting the `<domain-config>`
   block below. We intentionally do not ship cleartext-enabled for any

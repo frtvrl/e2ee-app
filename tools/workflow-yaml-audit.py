@@ -68,9 +68,19 @@ except ImportError:
     print("PyYAML not installed; install via `pip install pyyaml`", file=sys.stderr)
     sys.exit(1)
 
+try:
+    import xml.etree.ElementTree as ET
+except ImportError:
+    ET = None  # S8 audit will report a missing-XML-parser finding if used.
+
 WORKFLOWS_DIR = Path(__file__).resolve().parent.parent / ".github" / "workflows"
 REPO_ROOT = Path(__file__).resolve().parent.parent
 TARGETS = ["android-debug.yml", "ci.yml", "ios.yml", "android-release.yml"]
+# Sprint 9.6.9 — directory scanned for *.xml files that end up in the
+# APK (and so must satisfy aapt2's XML 1.0 parser).
+ANDROID_RES_XML_DIR = (
+    REPO_ROOT / "mobile" / "android" / "app" / "src" / "main" / "res" / "xml"
+)
 
 # Flutter 3.44.1 minimum version pins (env.FLUTTER_VERSION in all 4
 # workflows; cross-cycle consistency).
@@ -738,6 +748,111 @@ def check_mobile_entry_point_v4() -> list[str]:
     return findings
 
 
+def check_android_xml_comments_v5() -> list[str]:
+    """Sprint 9.6.9 v5: XML comment well-formedness check (S8).
+
+    The 9.6.8 live build (commit edd3023 on main, fast-forward
+    merged by Owner) advanced past `compileFlutterBuildDebug` for
+    the first time in the 9.6.x chain. The next task,
+    `:app:mergeDebugResources`, failed because
+    `mobile/android/app/src/main/res/xml/network_security_config.xml`
+    contained XML comments with `--` runs (e.g. `---------------`).
+    The XML 1.0 spec forbids `--` inside `<!-- ... -->`; Android's
+    `aapt2` / `ResourceCompiler` enforces this and rejects the
+    file with `The string "--" is not permitted within comments`.
+
+    This check enforces the rule statically so a future
+    regression cannot land:
+
+      (a) Every `*.xml` under
+          `mobile/android/app/src/main/res/xml/` parses as
+          well-formed XML via `xml.etree.ElementTree.fromstring`
+          (Python's stdlib XML 1.0 parser — same rule aapt2 uses
+          up to differences in namespace handling).
+      (b) No `<!-- ... -->` comment body contains a `--` run
+          (the regex finds `--` INSIDE comments; the legitimate
+          `<!--` opener and `-->` closer are stripped first by
+          walking the comment match bounds).
+
+    Implementation notes (apply 9.6.5 lesson): we DO NOT
+    regex-grep raw text for `--` — we use `ET.fromstring` to
+    validate well-formedness AND iterate the captured comment
+    text from a regex pass to assert no `--` run lives inside.
+    A comment that LEGITIMATELY contains the text "the `--`
+    keyword" would still fail (correct: the only way to write
+    that in XML is to break the comment into two comments,
+    e.g. `<!-- the --><!--  keyword -->` — accepted XML
+    limitation, see https://www.w3.org/TR/xml/#sec-comments).
+
+    Scope: only `mobile/android/app/src/main/res/xml/*.xml`.
+    We do NOT scan `mobile/lib/` Dart sources, and we do NOT
+    scan the broader `mobile/android/` tree (CI's `aapt2` is
+    what cares about the resource dir, not arbitrary XML).
+    """
+    findings = []
+    if ET is None:
+        findings.append(
+            "S8 mobile/android/app/src/main/res/xml/: Python's xml.etree.ElementTree "
+            "is unavailable; cannot run the S8 check (Sprint 9.6.9 invariant — "
+            "Python 3 ships ET in the stdlib; this finding means ET was monkey-patched away)"
+        )
+        return findings
+    if not ANDROID_RES_XML_DIR.exists():
+        findings.append(
+            f"S8 {ANDROID_RES_XML_DIR}: directory missing (Sprint 9.6.9 "
+            "invariant — Android resource XML directory should exist; the build "
+            "would fail with a different message if it were truly missing)"
+        )
+        return findings
+
+    xml_files = sorted(ANDROID_RES_XML_DIR.glob("*.xml"))
+    if not xml_files:
+        # No XML files is a valid state (e.g. minimal app). Do not
+        # emit a finding — the absence of XML files does not need
+        # to be audited.
+        return findings
+
+    for xml_path in xml_files:
+        rel = xml_path.relative_to(REPO_ROOT)
+        try:
+            text = xml_path.read_text(encoding="utf-8")
+        except OSError as e:
+            findings.append(
+                f"S8 {rel}: read failed ({e})"
+            )
+            continue
+        # (a) well-formedness via real XML parser
+        try:
+            ET.fromstring(text)
+        except ET.ParseError as e:
+            findings.append(
+                f"S8 {rel}: XML parse failed ({e.msg} at line {e.position[0]} col "
+                f"{e.position[1]}) — aapt2 will refuse this file; Sprint 9.6.9 fix"
+            )
+            continue
+        # (b) walk `<!-- ... -->` blocks and assert no `--` inside body
+        for match in re.finditer(r"<!--(.*?)-->", text, re.DOTALL):
+            body = match.group(1)
+            if "--" in body:
+                # Compute the line number of the `--` inside body
+                start_offset = match.start(1)
+                body_index_of = body.index("--")
+                absolute_offset = start_offset + body_index_of
+                line_no = text.count("\n", 0, absolute_offset) + 1
+                findings.append(
+                    f"S8 {rel}: line {line_no} contains `--` inside an XML "
+                    f"comment — XML 1.0 spec forbids this and Android's aapt2 "
+                    f"rejects the file with 'The string \"--\" is not permitted "
+                    f"within comments'. Sprint 9.6.9 fix: replace dash runs in "
+                    f"comment headers with a non-`-` separator (e.g. `===`)."
+                )
+                # Report only the first offending comment per file so a
+                # single fix-cycle per file is the natural workflow.
+                break
+
+    return findings
+
+
 def main() -> int:
     all_findings = []
     for fname in TARGETS:
@@ -793,12 +908,19 @@ def main() -> int:
     else:
         print("PASS: mobile entry point (lib/main.dart + runApp( + ProviderScope + pubspec flutter_riverpod + go_router) — Sprint 9.6.8 S7)")
 
+    # Sprint 9.6.9 v5: XML well-formedness check (S8) — Android res/xml comments.
+    s8_findings = check_android_xml_comments_v5()
+    if s8_findings:
+        all_findings.extend(s8_findings)
+    else:
+        print("PASS: Android res/xml comments well-formed (no `--` inside `<!-- -->`) — Sprint 9.6.9 S8")
+
     if all_findings:
         print("\nFINDINGS:")
         for f in all_findings:
             print(f"  - {f}")
         return 1
-    print("\nALL 4 WORKFLOWS + GRADLE WRAPPER + AGP + KOTLIN + SYNTAX v2 + S6 flutter pub get step + S7 mobile entry point PASS PyYAML AUDIT.")
+    print("\nALL 4 WORKFLOWS + GRADLE WRAPPER + AGP + KOTLIN + SYNTAX v2 + S6 flutter pub get step + S7 mobile entry point + S8 Android XML comments PASS PyYAML AUDIT.")
     return 0
 
 
