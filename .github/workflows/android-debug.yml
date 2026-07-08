@@ -69,6 +69,13 @@ on:
           - macos-latest
           - windows-latest
 
+# Sprint 9.6.2 hotfix: pin Flutter version explicitly so
+# subosito/flutter-action@v2 reliably exports FLUTTER_HOME in the runner
+# shell (matches android-release.yml/ios.yml/ci.yml env var pattern —
+# all three workflows use 3.44.1 as their flutter-version pin).
+env:
+  FLUTTER_VERSION: "3.44.1"
+
 jobs:
   android-debug:
     runs-on: ${{ github.event.inputs.runner || 'ubuntu-latest' }}
@@ -89,31 +96,79 @@ jobs:
           api-level: 34  # Sprint 7 MOB-5 minSdk 23, target 34
           arch: x86_64
 
-      # Sprint 9.6.1 hotfix: settings.gradle.kts line 50 reads
-      # `flutter.sdk` from `mobile/android/local.properties` and aborts
-      # the build with "flutter.sdk not set in local.properties — copy
-      # local.properties.example" if the key is missing. Adding a
-      # `subosito/flutter-action@v2` step (channel: stable, latest
-      # pinned version) installs Flutter and exports `${FLUTTER_HOME}`
-      # (the Flutter SDK install root) on every runner OS, so we can
-      # write it directly into local.properties alongside `sdk.dir`.
+      # Sprint 9.6.2 hotfix: Sprint 9.6.1 (commit 87ccf3b) added this
+      # `Setup Flutter` step + `flutter.sdk=${FLUTTER_HOME}` echo, but a
+      # live workflow_dispatch run AFTER Sprint 9.6.1 PR #13 push
+      # (origin/main @ 0672503) FAILED at settings.gradle.kts:56:
+      #
+      #   Included build '/packages/flutter_tools/gradle' does not exist.
+      #
+      # Root cause: `${FLUTTER_HOME}` resolved to EMPTY in the runner
+      # shell. settings.gradle.kts:49 then returned `""` for `flutter.sdk`
+      # (NOT null, so `require` check passed), which concatenated to
+      # `/packages/flutter_tools/gradle` (absolute path that doesn't exist).
+      #
+      # Sprint 9.6.2 fix (Plan A minimal, single task + Integration Gate):
+      #
+      #   1. Pin flutter-version (matches android-release.yml/ios.yml/ci.yml
+      #      env.FLUTTER_VERSION=3.44.1). subosito/flutter-action@v2 reliably
+      #      exports FLUTTER_HOME when a specific version is requested; with
+      #      `channel: stable` only, the install-to-path mapping is dynamic
+      #      and the env var may not be set in time for the next step.
+      #   2. (Primary defense) Generate local.properties derives `flutter.sdk`
+      #      from `which flutter` (PATH-based) instead of `$FLUTTER_HOME`.
+      #      subosito/flutter-action@v2 ALWAYS adds flutter to PATH via
+      #      `core.addPath`, so `which flutter` returns the binary path;
+      #      `dirname x2` gives the SDK root. PATH is universally available
+      #      in the runner shell, so this is independent of FLUTTER_HOME
+      #      export consistency between action versions.
       - name: Setup Flutter
         uses: subosito/flutter-action@v2
         with:
+          flutter-version: ${{ env.FLUTTER_VERSION }}
           channel: stable
 
       # Sprint 9.6 hotfix: `mobile/android/local.properties` is gitignored
-      # (Sprint 7 MOB-4 key.properties pattern), so CI must generate it before
-      # `./gradlew assembleDebug` or the build fails with "No such file or
-      # directory". `${ANDROID_HOME}` is exported by android-actions/setup-android@v3.
-      # Sprint 9.6.1 added `${FLUTTER_HOME}` (exported by subosito/flutter-action@v2
-      # above) to satisfy settings.gradle.kts line 50's `flutter.sdk` requirement.
-      # Both are shell vars, NOT `${{ env.* }}` GH Actions expressions.
+      # (Sprint 7 MOB-4 key.properties pattern), so CI must generate it
+      # before `./gradlew assembleDebug` or the build fails with "No such
+      # file or directory". `${ANDROID_HOME}` is exported by
+      # android-actions/setup-android@v3.
+      #
+      # Sprint 9.6.1 added `flutter.sdk=${FLUTTER_HOME}` (shell var from
+      # subosito/flutter-action@v2) — but FLUTTER_HOME was empty in the
+      # runner shell, causing settings.gradle.kts:56 to compute
+      # `includeBuild("")` = `/packages/flutter_tools/gradle` (absolute
+      # path) and fail.
+      #
+      # Sprint 9.6.2 fix: derive flutter.sdk from `which flutter`
+      # (PATH-based, robust regardless of FLUTTER_HOME export).
+      # Two `dirname` operations strip `bin/<binary-name>` → Flutter SDK
+      # install root.
       - name: Generate local.properties
         run: |
           echo "sdk.dir=${ANDROID_HOME}" > "${GITHUB_WORKSPACE}/mobile/android/local.properties"
-          echo "flutter.sdk=${FLUTTER_HOME}" >> "${GITHUB_WORKSPACE}/mobile/android/local.properties"
+          FLUTTER_BIN=$(which flutter)
+          FLUTTER_SDK=$(dirname $(dirname "${FLUTTER_BIN}"))
+          echo "flutter.sdk=${FLUTTER_SDK}" >> "${GITHUB_WORKSPACE}/mobile/android/local.properties"
           cat "${GITHUB_WORKSPACE}/mobile/android/local.properties"
+
+      # Sprint 9.6.2 fast-fail signal. settings.gradle.kts:56 uses
+      # `<flutter.sdk>/packages/flutter_tools/gradle` as an `includeBuild`
+      # path. If that directory is absent (incomplete Flutter SDK install,
+      # wrong PATH resolution, or wrong FLUTTER_HOME), the build aborts
+      # with the same "Included build '/packages/flutter_tools/gradle' does
+      # not exist" error from Sprint 9.6.1. This step catches that BEFORE
+      # ./gradlew assembleDebug consumes 10+ minutes of CI time.
+      - name: Verify Flutter SDK path
+        run: |
+          FLUTTER_BIN=$(which flutter)
+          FLUTTER_SDK=$(dirname $(dirname "${FLUTTER_BIN}"))
+          echo "Flutter SDK: ${FLUTTER_SDK}"
+          if [ ! -d "${FLUTTER_SDK}/packages/flutter_tools/gradle" ]; then
+            echo "::error::Flutter SDK install incomplete: ${FLUTTER_SDK}/packages/flutter_tools/gradle missing"
+            exit 1
+          fi
+          echo "flutter_tools/gradle: PRESENT"
 
       - name: Cache Gradle
         uses: actions/cache@v4
