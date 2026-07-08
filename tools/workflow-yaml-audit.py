@@ -1,8 +1,9 @@
 """
-PyYAML audit for 4 GH Actions workflows.
+PyYAML audit for 4 GH Actions workflows + Gradle wrapper version invariant.
 Per memory rule: PyYAML 1.1 parses `on:` as boolean `True` — use d[True].
-Applies to all workflow files; tracks the Sprint 9.6.2 fix invariants
-(added 2026-07-08 after Sprint 9.6.1 PR #13 push CI FAIL).
+Applies to all workflow files; tracks the Sprint 9.6.2 + 9.6.3 fix invariants
+(added 2026-07-08 after Sprint 9.6.1 PR #13 push CI FAIL and Sprint 9.6.2
+PR #14 push CI FAIL).
 
 Verifies:
   1. All 4 workflows have ONLY workflow_dispatch trigger (no push/pull_request).
@@ -18,13 +19,25 @@ Verifies:
      (fast-fail signal BEFORE ./gradlew assembleDebug).
   6. ci.yml/ios.yml/android-release.yml have NO inputs.runner
      (matrix/single-runner workflows don't need it).
+  7. **Sprint 9.6.3:** gradle-wrapper.properties distributionUrl must be
+     >= 8.7.0 (Flutter 3.44.1 minimum). Sprint 9.6.2 fix made
+     `flutter_tools/gradle` resolve correctly, but a live workflow_dispatch
+     run after Sprint 9.6.2 PR #14 push failed at app/build.gradle.kts:80
+     with "Your project's Gradle version (8.5.0) is lower than Flutter's
+     minimum supported version of 8.7.0".
 """
+import re
 import yaml
 import sys
 from pathlib import Path
 
 WORKFLOWS_DIR = Path(__file__).resolve().parent.parent / ".github" / "workflows"
+REPO_ROOT = Path(__file__).resolve().parent.parent
 TARGETS = ["android-debug.yml", "ci.yml", "ios.yml", "android-release.yml"]
+
+# Flutter 3.44.1 minimum Gradle version (set in env.FLUTTER_VERSION in all
+# 4 workflows; cross-cycle consistency).
+FLUTTER_MIN_GRADLE = (8, 7)
 
 
 def audit_workflow(path: Path) -> list[str]:
@@ -123,6 +136,45 @@ def audit_workflow(path: Path) -> list[str]:
     return findings
 
 
+def check_gradle_wrapper_version() -> list[str]:
+    """Sprint 9.6.3: gradle-wrapper.properties distributionUrl >= Flutter minimum.
+
+    Flutter 3.44.1 (project-wide pin via env.FLUTTER_VERSION in all 4 workflows)
+    requires Gradle >= 8.7.0. Sprint 9.6.2 fix made `flutter_tools/gradle`
+    resolve correctly, but a live workflow_dispatch run after Sprint 9.6.2
+    PR #14 push failed at app/build.gradle.kts:80 with:
+        "Your project's Gradle version (8.5.0) is lower than Flutter's
+         minimum supported version of 8.7.0."
+    This check parses `gradle-wrapper.properties` distributionUrl and
+    fails if the embedded Gradle version is below FLUTTER_MIN_GRADLE.
+    """
+    findings = []
+    gradle_props_path = REPO_ROOT / "mobile" / "android" / "gradle" / "wrapper" / "gradle-wrapper.properties"
+    if not gradle_props_path.exists():
+        findings.append(
+            f"{gradle_props_path.name}: file missing (Sprint 9.6.3 invariant)"
+        )
+        return findings
+    text = gradle_props_path.read_text(encoding="utf-8")
+    # Pattern: distributionUrl=.../gradle-X.Y(-bin).zip
+    match = re.search(r"gradle-(\d+)\.(\d+)(?:-bin)?\.zip", text)
+    if not match:
+        findings.append(
+            f"gradle-wrapper.properties: distributionUrl pattern not recognized "
+            "(expected `gradle-X.Y-bin.zip`)"
+        )
+        return findings
+    gradle_version = (int(match.group(1)), int(match.group(2)))
+    if gradle_version < FLUTTER_MIN_GRADLE:
+        findings.append(
+            f"gradle-wrapper.properties: distributionUrl Gradle {gradle_version[0]}.{gradle_version[1]} "
+            f"< Flutter 3.44.1 minimum {FLUTTER_MIN_GRADLE[0]}.{FLUTTER_MIN_GRADLE[1]} "
+            "(Sprint 9.6.3 fix — was 8.5 in Sprint 9.6.2, live run failed at "
+            "app/build.gradle.kts:80 with Flutter Gradle plugin version check)"
+        )
+    return findings
+
+
 def main() -> int:
     all_findings = []
     for fname in TARGETS:
@@ -135,12 +187,20 @@ def main() -> int:
             all_findings.extend(findings)
         else:
             print(f"PASS: {fname}")
+
+    # Sprint 9.6.3: Gradle wrapper version invariant check.
+    gradle_findings = check_gradle_wrapper_version()
+    if gradle_findings:
+        all_findings.extend(gradle_findings)
+    else:
+        print(f"PASS: gradle-wrapper.properties distributionUrl >= {FLUTTER_MIN_GRADLE[0]}.{FLUTTER_MIN_GRADLE[1]}")
+
     if all_findings:
         print("\nFINDINGS:")
         for f in all_findings:
             print(f"  - {f}")
         return 1
-    print("\nALL 4 WORKFLOWS PASS PyYAML AUDIT.")
+    print("\nALL 4 WORKFLOWS + GRADLE WRAPPER PASS PyYAML AUDIT.")
     return 0
 
 
