@@ -1,13 +1,22 @@
 # OpenE2EE — Android debug build workflow
 #
 # Sprint 9 / Item 1 (ANDROID-DEBUG-CI) — Hand-off from Architect.
+# Sprint 9.6 / Item 1 (WORKFLOW-UPDATE) — manual trigger only + local.properties
+# auto-generate. Trigger changed from `pull_request` + `workflow_dispatch` to
+# `workflow_dispatch` only (per user direction: devre dışı bırak testler
+# sırasında Actions dakikaları kontrol). The new `Generate local.properties`
+# step writes `sdk.dir=${ANDROID_HOME}` into `mobile/android/local.properties`
+# just before `./gradlew assembleDebug`, fixing the Sprint 9.5 "No such file
+# or directory" build failure (Sprint 7 MOB-4 key.properties gitignore pattern).
 #
 # Plan A scope (per Sprint 9 SCOPE.md user direction — "apk alabilmek
-# için gerektiği kadar"). Minimal PR-trigger debug APK build:
-#   * ubuntu-latest runner (matches Sprint 8 PR-MP-CI multi-OS baseline)
-#   * PR push on `main` + `feat/*` + manual workflow_dispatch
+# için gerektiği kadar"). Minimal manual-trigger debug APK build:
+#   * Runner choice via `workflow_dispatch` input (ubuntu/macos/windows,
+#     default ubuntu-latest — matches Sprint 8 PR-MP-CI multi-OS baseline)
+#   * Manual `workflow_dispatch` only — no `pull_request`/`push` auto-trigger
 #   * JDK 17 (matches mobile/android/app/build.gradle.kts sourceCompatibility)
 #   * android-actions/setup-android@v3 api-level 34 (matches compileSdk = 34)
+#   * Generate local.properties (`sdk.dir=${ANDROID_HOME}`) before assembleDebug
 #   * Cache Gradle (~/.gradle/caches + ~/.gradle/wrapper)
 #   * Build Debug APK (./gradlew assembleDebug, signed with AGP debug keystore)
 #   * Upload 2 artifacts: android-debug-apk (14d) + android-mapping-files (30d)
@@ -45,18 +54,24 @@
 #     (compileSdk = 34, minSdk = 23, targetSdk = 34, JavaVersion.VERSION_17)
 #   * mobile/android/build.gradle.kts — Flutter project Gradle root
 
-name: Android Debug APK
+name: Android Debug APK (Manual Trigger)
 
 on:
-  pull_request:
-    branches:
-      - main
-      - feat/*  # Sprint 7 + 8 feature branches
   workflow_dispatch:
+    inputs:
+      runner:
+        description: 'Runner type'
+        required: false
+        default: 'ubuntu-latest'
+        type: choice
+        options:
+          - ubuntu-latest
+          - macos-latest
+          - windows-latest
 
 jobs:
   android-debug:
-    runs-on: ubuntu-latest
+    runs-on: ${{ github.event.inputs.runner || 'ubuntu-latest' }}
     timeout-minutes: 30
     steps:
       - name: Checkout
@@ -73,6 +88,15 @@ jobs:
         with:
           api-level: 34  # Sprint 7 MOB-5 minSdk 23, target 34
           arch: x86_64
+
+      # Sprint 9.6 hotfix: `mobile/android/local.properties` is gitignored
+      # (Sprint 7 MOB-4 key.properties pattern), so CI must generate it before
+      # `./gradlew assembleDebug` or the build fails with "No such file or
+      # directory". `${ANDROID_HOME}` is exported by android-actions/setup-android@v3.
+      - name: Generate local.properties
+        run: |
+          echo "sdk.dir=${ANDROID_HOME}" > "${GITHUB_WORKSPACE}/mobile/android/local.properties"
+          cat "${GITHUB_WORKSPACE}/mobile/android/local.properties"
 
       - name: Cache Gradle
         uses: actions/cache@v4
