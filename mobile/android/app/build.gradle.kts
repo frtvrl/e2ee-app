@@ -77,6 +77,54 @@
 //   - docs/ADR-0003-vpn-layer.md
 //   - docs/ADR-0006-anonimlik.md (Ed25519 private-key-at-rest contract)
 //   - docs/SPRINT-7-SCOPE.md §Item 6 MOB-5
+//
+// ─── SPRINT-9.6.6 — Kotlin 2.0+ DSL import hygiene (Kotlin 2.2.20 + AGP 8.11.1)
+// ──────────────────────────────────────────────────────────────────────
+// Sprint 9.6.5 partially fixed Kotlin 2.0+ DSL strictness (smart cast
+// `as String` removal, `variant` rename to `_`, `keyProps.getProperty(...)`
+// access) but TWO defects were left in place and a live workflow_dispatch
+// run AFTER Sprint 9.6.5 PR #16 push (origin/main @ e2b7055) failed with:
+//   (a) `kotlinOptions { jvmTarget = "17" }` is DEPRECATED in Kotlin
+//       2.0+ — the build emits a deprecation warning and AGP 8.11.1 +
+//       Kotlin 2.2.20 treat the warning as an error in CI. The
+//       migration target is `kotlin { compilerOptions { jvmTarget
+//       .set(JvmTarget.JVM_17) } }`, which requires the explicit
+//       import `org.jetbrains.kotlin.gradle.dsl.JvmTarget`.
+//   (b) The Sprint 9.6.5 comment claimed "explicit `import
+//       java.util.Properties`" but the file STILL uses the fully-
+//       qualified `java.util.Properties()` form at line 151. Kotlin
+//       2.0+ is stricter on implicit imports — the Kotlin compiler
+//       rejects fully-qualified class names that are not preceded by
+//       an explicit `import` statement with:
+//         "Unresolved reference: util" (line 145, the class
+//         reference inside the lambda)
+//         "Unresolved reference: load" (line 152, the Properties
+//         `load(InputStream)` call inside the `apply { ... }` block
+//         requires the explicit `Properties` type to be in scope)
+//       Sprint 9.6.6 fixes BOTH defects: explicit `import
+//       java.util.Properties` is added at the top of this file, and
+//       the fully-qualified `java.util.Properties()` usage on line
+//       151 is replaced with the short form `Properties()`.
+//   (c) The original Sprint 5 form used `apply { load(...) }` to
+//       populate the Properties. With the explicit import in
+//       place (item (b) above), the implicit receiver
+//       `load(keyPropsFile.inputStream())` resolves correctly:
+//       `apply` provides `this` as `Properties`, and
+//       `load(InputStream)` is a method on `Properties`. Kotlin
+//       2.0+'s stricter smart-cast receiver handling is satisfied
+//       because `this` is a stable, fully-typed `Properties`
+//       reference, NOT a `MutableMap<String, Any>` (the pre-2.0
+//       form's implicit type).
+//
+// Audit-script side (tools/workflow-yaml-audit.py): the Sprint 9.6.5
+// pair-check `check_app_build_gradle_syntax()` was a substring search
+// for `import java.util.Properties` and returned PASS when the
+// substring appeared INSIDE a comment — a false positive. Sprint
+// 9.6.6 fixes this by parsing actual `^import <pkg>` lines via
+// regex (ignoring line-comment and block-comment context).
+
+import java.util.Properties
+import org.jetbrains.kotlin.gradle.dsl.JvmTarget
 
 plugins {
     id("com.android.application")
@@ -94,9 +142,15 @@ android {
         targetCompatibility = JavaVersion.VERSION_17
     }
 
-    kotlinOptions {
-        jvmTarget = "17"
-    }
+    // Sprint 9.6.6: `kotlinOptions { jvmTarget = "17" }` (the
+    // nested form inside `android { }`) is DEPRECATED in Kotlin
+    // 2.0+ and emits a deprecation warning that AGP 8.11.1 +
+    // Kotlin 2.2.20 treat as a build error in CI. The migration
+    // moves `kotlin { compilerOptions { ... } }` OUT of the
+    // `android { }` block to a TOP-LEVEL sibling (defined
+    // immediately after `android { }` closes, before
+    // `flutter { }`). See the SPRINT-9.6.6 rationale block at the
+    // top of this file and the top-level `kotlin { }` block below.
 
     sourceSets {
         getByName("main").java.srcDirs("src/main/kotlin")
@@ -143,12 +197,40 @@ android {
         create("release") {
             val keyPropsFile = rootProject.file("key.properties")
             if (keyPropsFile.exists()) {
-                // Sprint 9.6.5: explicit `import java.util.Properties` (Kotlin 2.0+
-                // is stricter on implicit imports; previously `java.util.Properties`
-                // worked but the build now fails with
-                //   "Unresolved reference: util"
-                // at app/build.gradle.kts:145).
-                val keyProps = java.util.Properties().apply {
+                // Sprint 9.6.6: this block was partially fixed in
+                // Sprint 9.6.5 (smart-cast + `variant` rename) but
+                // the `import java.util.Properties` statement was
+                // NEVER added — only a comment claiming it was. A
+                // live workflow_dispatch run AFTER Sprint 9.6.5 PR
+                // #16 push (origin/main @ e2b7055) failed at this
+                // line with:
+                //   "Unresolved reference: util" (the fully-qualified
+                //    `java.util.Properties` form rejected by Kotlin
+                //    2.0+ without an explicit import)
+                //   "Unresolved reference: load" (the
+                //    `apply { load(...) }` block needs the explicit
+                //    `Properties` type to be in scope)
+                // Sprint 9.6.6 fixes by:
+                //   1. Adding `import java.util.Properties` at the
+                //      top of this file (Kotlin 2.0+ requires the
+                //      import to be a real statement, not just a
+                //      substring match in a comment).
+                //   2. Using the short form `Properties()` instead
+                //      of the fully-qualified `java.util.Properties()`
+                //      here.
+                //   3. Using `load(keyPropsFile.inputStream())` with
+                //      implicit receiver — the `apply { ... }` block
+                //      provides `this` as the `Properties` receiver,
+                //      and `load(InputStream)` is a method on
+                //      `Properties`. With the explicit
+                //      `import java.util.Properties` at the top of
+                //      this file, the implicit receiver resolves
+                //      correctly. (Earlier draft attempted
+                //      `keyProps.load(...)` with an explicit receiver,
+                //      but that references `keyProps` inside the
+                //      `apply { }` block BEFORE the variable is
+                //      initialized — a Kotlin compile error.)
+                val keyProps = Properties().apply {
                     load(keyPropsFile.inputStream())
                 }
                 // Sprint 9.6.5: smart cast handles the `as String` conversion
@@ -213,6 +295,30 @@ android {
 
 flutter {
     source = "../.."
+}
+
+// Sprint 9.6.6: Kotlin 2.0+ DSL migration. The deprecated
+// `kotlinOptions { jvmTarget = "17" }` block (nested inside
+// `android { }`) is replaced with a TOP-LEVEL `kotlin { ... }`
+// extension block. `compilerOptions` is the Kotlin 2.0+ API;
+// `jvmTarget.set(JvmTarget.JVM_17)` uses the strongly-typed
+// `JvmTarget` enum (imported at the top of this file) instead
+// of a String "17". The block is a SIBLING of `android { }`,
+// not nested inside it — this is the form AGP 8.11.1 +
+// Kotlin 2.2.20 expect.
+//
+// Migration path (Sprint 5 → Sprint 9.6.6):
+//   Sprint 5     : android { kotlinOptions { jvmTarget = "17" } }
+//   Sprint 9.6.6 : kotlin { compilerOptions { jvmTarget.set(JvmTarget.JVM_17) } }
+//
+// Verification: tools/workflow-yaml-audit.py
+// `check_app_build_gradle_kotlin_options_syntax()` fails the audit
+// if the deprecated `kotlinOptions { jvmTarget = "..." }` block
+// reappears in any future commit.
+kotlin {
+    compilerOptions {
+        jvmTarget.set(JvmTarget.JVM_17)
+    }
 }
 
 dependencies {

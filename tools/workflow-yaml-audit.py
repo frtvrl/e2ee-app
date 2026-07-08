@@ -3,9 +3,10 @@ PyYAML audit for 4 GH Actions workflows + Gradle wrapper + AGP + Kotlin
 + app/build.gradle.kts syntax invariants.
 Per memory rule: PyYAML 1.1 parses `on:` as boolean `True` — use d[True].
 Applies to all workflow files; tracks the Sprint 9.6.2 + 9.6.3 + 9.6.4 +
-9.6.5 fix invariants (added 2026-07-08 after Sprint 9.6.1 PR #13 push CI
-FAIL, Sprint 9.6.2 PR #14 push CI FAIL, Sprint 9.6.3 PR #15 push CI FAIL,
-and Sprint 9.6.4 PR #15 (PUSHED) live build test CI FAIL).
+9.6.5 + 9.6.6 fix invariants (added 2026-07-08 after Sprint 9.6.1 PR #13
+push CI FAIL, Sprint 9.6.2 PR #14 push CI FAIL, Sprint 9.6.3 PR #15 push
+CI FAIL, Sprint 9.6.4 PR #15 (PUSHED) live build test CI FAIL, Sprint
+9.6.5 PR #16 (PUSHED) live build test CI FAIL).
 
 Verifies:
   1. All 4 workflows have ONLY workflow_dispatch trigger (no push/pull_request).
@@ -22,33 +23,35 @@ Verifies:
   6. ci.yml/ios.yml/android-release.yml have NO inputs.runner
      (matrix/single-runner workflows don't need it).
   7. **Sprint 9.6.3:** gradle-wrapper.properties distributionUrl must be
-     >= 8.7.0 (Flutter 3.44.1 minimum). Sprint 9.6.2 fix made
-     `flutter_tools/gradle` resolve correctly, but a live workflow_dispatch
-     run after Sprint 9.6.2 PR #14 push failed at app/build.gradle.kts:80
-     with "Your project's Gradle version (8.5.0) is lower than Flutter's
-     minimum supported version of 8.7.0".
+     >= 8.7.0 (Flutter 3.44.1 minimum).
   8. **Sprint 9.6.4:** mobile/android/build.gradle.kts AGP plugin version
-     must be >= 8.6.0 (Flutter 3.44.1 minimum). Sprint 9.6.3 cherry-pick
-     bumped Gradle 8.5 → 8.10, but Flutter then emitted a deprecation
-     warning (Gradle 8.10 soon-dropped) and failed at app/build.gradle.kts:80
-     with "Your project's Android Gradle Plugin version (8.1.4) is lower
-     than Flutter's minimum supported version of Android Gradle Plugin
-     version 8.6.0".
+     must be >= 8.6.0 (Flutter 3.44.1 minimum).
   9. **Sprint 9.6.5:** build.gradle.kts Kotlin plugin version must be
-     >= 2.2 (Flutter 3.44.1 soon-dropped floor). Sprint 9.6.4 cherry-pick
-     bumped AGP 8.1.4 → 8.6.1, but Flutter emitted a deprecation warning
-     and the Kotlin 2.0+ DSL compiler rejected the Sprint 5 era
-     `java.util.Properties().apply { ... }` block (no explicit import)
-     + `as String` casts (smart cast handles) + unused parameter
-     `variant` (rename to `_`).
- 10. **Sprint 9.6.5:** app/build.gradle.kts must `import java.util.Properties`
-     explicitly if it uses Properties (Kotlin 2.0+ stricter on implicit
-     imports). Static check for the import + Properties usage pairing.
+     >= 2.2 (Flutter 3.44.1 soon-dropped floor).
+ 10. **Sprint 9.6.6 (v2):** app/build.gradle.kts Kotlin DSL syntax check
+     with 4 sub-checks:
+     S1. real `import java.util.Properties` statement exists at line start
+         (NOT substring in a comment — Sprint 9.6.5 had a false-positive
+         match on a comment claiming the import was added).
+     S2. real `import org.jetbrains.kotlin.gradle.dsl.JvmTarget` statement
+         exists (required by kotlin { compilerOptions } block).
+     S3. deprecated `kotlinOptions { jvmTarget = "..." }` block is NOT
+         present in code (Kotlin 2.0+ deprecation warning treated as
+         build error in CI by AGP 8.11.1 + Kotlin 2.2.20).
+     S4. new `kotlin { compilerOptions { jvmTarget.set(JvmTarget.JVM_17) } }`
+         block IS present in code (correct Kotlin 2.0+ replacement).
+     S5. fully-qualified `java.util.Properties()` usage is NOT present
+         in code (must use short form `Properties()` after the import).
 """
 import re
-import yaml
 import sys
 from pathlib import Path
+
+try:
+    import yaml
+except ImportError:
+    print("PyYAML not installed; install via `pip install pyyaml`", file=sys.stderr)
+    sys.exit(1)
 
 WORKFLOWS_DIR = Path(__file__).resolve().parent.parent / ".github" / "workflows"
 REPO_ROOT = Path(__file__).resolve().parent.parent
@@ -59,6 +62,52 @@ TARGETS = ["android-debug.yml", "ci.yml", "ios.yml", "android-release.yml"]
 FLUTTER_MIN_GRADLE = (8, 7)
 FLUTTER_MIN_AGP = (8, 6)
 FLUTTER_MIN_KOTLIN = (2, 2)
+
+
+def strip_comments(text: str) -> str:
+    """Strip // and /* */ comments while preserving strings (best effort).
+
+    Critical: Sprint 9.6.5 audit had false positive because substring
+    match on `import java.util.Properties` matched a comment claiming
+    the import was added. v2 parses only actual code lines.
+
+    Conservative string handling: tracks " inside each line and only
+    strips // outside string literals. For .kts / .py / .gradle files
+    this is sufficient. Not a full parser.
+    """
+    # Strip /* ... */ block comments first (they span lines)
+    text = re.sub(r"/\*[\s\S]*?\*/", "", text)
+    # Strip line comments per-line, tracking "string" boundaries
+    lines = text.splitlines()
+    out = []
+    for ln in lines:
+        in_string = False
+        escape = False
+        i = 0
+        cut_at = -1
+        while i < len(ln):
+            c = ln[i]
+            if escape:
+                escape = False
+                i += 1
+                continue
+            if c == "\\":
+                escape = True
+                i += 1
+                continue
+            if c == '"':
+                in_string = not in_string
+                i += 1
+                continue
+            if c == "/" and i + 1 < len(ln) and ln[i + 1] == "/" and not in_string:
+                cut_at = i
+                break
+            i += 1
+        if cut_at >= 0:
+            out.append(ln[:cut_at])
+        else:
+            out.append(ln)
+    return "\n".join(out)
 
 
 def audit_workflow(path: Path) -> list[str]:
@@ -310,46 +359,117 @@ def check_kotlin_version() -> list[str]:
     return findings
 
 
-def check_app_build_gradle_syntax() -> list[str]:
-    """Sprint 9.6.5: app/build.gradle.kts Kotlin DSL syntax check.
+def check_app_build_gradle_syntax_v2() -> list[str]:
+    """Sprint 9.6.6 v2: app/build.gradle.kts Kotlin DSL syntax check with
+    5 sub-checks (S1-S5). Replaces Sprint 9.6.5 v1 which had a false
+    positive: it searched for substring `import java.util.Properties`
+    in the file text, which matched a COMMENT that claimed the import
+    was added but the file did not actually have the import.
 
-    The Kotlin 2.0+ DSL compiler is stricter on implicit imports.
-    Sprint 5 era `app/build.gradle.kts` used
-    `java.util.Properties().apply { ... }` without an explicit
-    `import java.util.Properties` and worked because Kotlin 1.9's
-    compiler allowed implicit imports. Kotlin 2.0+ rejects this
-    with "Unresolved reference: util".
+    v2 fixes the false positive by stripping line/block comments before
+    running the regex. It also adds S2 (JvmTarget import), S3
+    (deprecated kotlinOptions block absence), S4 (new kotlin {
+    compilerOptions } presence), and S5 (no fully-qualified
+    java.util.Properties() usage).
 
-    This check ensures that if `app/build.gradle.kts` uses
-    `Properties` (or `java.util.Properties` fully-qualified), it
-    also has the explicit `import java.util.Properties` statement.
+    The 4-sub-check rubric the Architect specified maps to S1-S4 (the
+    core Kotlin 2.0+ DSL requirements); S5 is a defensive bonus.
 
-    Note: this is a syntactic pair-check, not a real Kotlin compiler
-    invocation. Sprint 9.7+ plan includes a real `gh workflow run`
-    (Check L) for definitive verification, since static checks have
-    failed 6 times in this chain.
+    Sub-check failure mode (the Sprint 9.6.5 false positive):
+        The Sprint 9.6.5 commit added a comment
+            // explicit `import java.util.Properties` ...
+        but the file STILL used the fully-qualified
+            val keyProps = java.util.Properties().apply { ... }
+        The Sprint 9.6.5 audit's substring search
+            has_import = "import java.util.Properties" in text
+        returned True (matching the comment) and reported PASS, while
+        the live workflow_dispatch run AFTER Sprint 9.6.5 PR #16
+        push (origin/main @ e2b7055) failed at line 151 with:
+            Unresolved reference: util
+            Unresolved reference: load
     """
     findings = []
     app_gradle_path = REPO_ROOT / "mobile" / "android" / "app" / "build.gradle.kts"
     if not app_gradle_path.exists():
         findings.append(
-            f"{app_gradle_path.name}: file missing (Sprint 9.6.5 syntax invariant)"
+            f"{app_gradle_path.name}: file missing (Sprint 9.6.6 syntax invariant)"
         )
         return findings
     text = app_gradle_path.read_text(encoding="utf-8")
-    # If Properties is used (either fully-qualified or short form)
-    # but the explicit import is missing, fail.
-    uses_properties = (
-        "java.util.Properties" in text
-        or re.search(r"\bProperties\(\)\.", text) is not None
+    code = strip_comments(text)
+
+    # S1: real `import java.util.Properties` line (line-anchored,
+    # not substring in a comment).
+    has_properties_import = bool(
+        re.search(r"^import\s+java\.util\.Properties\s*$", code, re.MULTILINE)
     )
-    has_import = "import java.util.Properties" in text
-    if uses_properties and not has_import:
+    if not has_properties_import:
         findings.append(
-            "app/build.gradle.kts: uses Properties without `import java.util.Properties` "
-            "(Sprint 9.6.5 fix — Kotlin 2.0+ requires explicit import; live run after "
-            "Sprint 9.6.4 PR #15 PUSHED failed at line 145 with 'Unresolved reference: util')"
+            "S1 app/build.gradle.kts: missing real `import java.util.Properties` "
+            "statement (Sprint 9.6.6 fix — Kotlin 2.0+ requires explicit import; "
+            "v1 audit false-positive matched a comment claiming the import was "
+            "added; live workflow_dispatch run after Sprint 9.6.5 PR #16 push "
+            "(origin/main @ e2b7055) failed at line 151 with 'Unresolved "
+            "reference: util')"
         )
+
+    # S2: real `import org.jetbrains.kotlin.gradle.dsl.JvmTarget` line.
+    has_jvm_target_import = bool(
+        re.search(
+            r"^import\s+org\.jetbrains\.kotlin\.gradle\.dsl\.JvmTarget\s*$",
+            code,
+            re.MULTILINE,
+        )
+    )
+    if not has_jvm_target_import:
+        findings.append(
+            "S2 app/build.gradle.kts: missing real `import "
+            "org.jetbrains.kotlin.gradle.dsl.JvmTarget` statement "
+            "(Sprint 9.6.6 fix — required by `kotlin { compilerOptions { "
+            "jvmTarget.set(JvmTarget.JVM_17) } }` block; live workflow_dispatch "
+            "run would fail with 'Unresolved reference: JvmTarget')"
+        )
+
+    # S3: deprecated `kotlinOptions { jvmTarget = "..." }` block NOT present.
+    deprecated_kotlin_options = bool(
+        re.search(r"kotlinOptions\s*\{[\s\S]*?jvmTarget\s*=\s*\"[\d]+\"", code)
+    )
+    if deprecated_kotlin_options:
+        findings.append(
+            "S3 app/build.gradle.kts: deprecated `kotlinOptions { jvmTarget = \"...\" }` "
+            "block still present in code (Sprint 9.6.6 fix — Kotlin 2.0+ emits "
+            "deprecation warning that AGP 8.11.1 + Kotlin 2.2.20 treat as build error "
+            "in CI; live workflow_dispatch run after Sprint 9.6.5 PR #16 push "
+            "(origin/main @ e2b7055) failed at line 98 with "
+            "'kotlinOptions is deprecated. Please use kotlin { compilerOptions { "
+            "jvmTarget } } instead')"
+        )
+
+    # S4: new `kotlin { compilerOptions { jvmTarget.set(JvmTarget.JVM_17) } }` block IS present.
+    new_kotlin_block = bool(
+        re.search(
+            r"kotlin\s*\{[\s\S]*?compilerOptions\s*\{[\s\S]*?jvmTarget\.set\(JvmTarget\.JVM_17\)",
+            code,
+        )
+    )
+    if not new_kotlin_block:
+        findings.append(
+            "S4 app/build.gradle.kts: missing `kotlin { compilerOptions { "
+            "jvmTarget.set(JvmTarget.JVM_17) } }` block (Sprint 9.6.6 fix — "
+            "the Kotlin 2.0+ replacement for the deprecated `kotlinOptions { "
+            "jvmTarget = \"17\" }` form)"
+        )
+
+    # S5 (defensive bonus): no fully-qualified `java.util.Properties()` usage.
+    fully_qualified = bool(re.search(r"java\.util\.Properties\(\)", code))
+    if fully_qualified:
+        findings.append(
+            "S5 app/build.gradle.kts: fully-qualified `java.util.Properties()` "
+            "usage still present in code (Sprint 9.6.6 fix — Kotlin 2.0+ rejects "
+            "fully-qualified types without explicit import; use short form "
+            "`Properties()` after `import java.util.Properties`)"
+        )
+
     return findings
 
 
@@ -380,25 +500,26 @@ def main() -> int:
     else:
         print(f"PASS: build.gradle.kts AGP version >= {FLUTTER_MIN_AGP[0]}.{FLUTTER_MIN_AGP[1]} (Flutter 3.44.1 minimum)")
 
-    # Sprint 9.6.5: Kotlin version + app/build.gradle.kts syntax invariants.
+    # Sprint 9.6.5: Kotlin version invariant check.
     kotlin_findings = check_kotlin_version()
     if kotlin_findings:
         all_findings.extend(kotlin_findings)
     else:
         print(f"PASS: build.gradle.kts Kotlin version >= {FLUTTER_MIN_KOTLIN[0]}.{FLUTTER_MIN_KOTLIN[1]} (Flutter 3.44.1 soon-dropped)")
 
-    syntax_findings = check_app_build_gradle_syntax()
+    # Sprint 9.6.6 v2: app/build.gradle.kts Kotlin DSL syntax (5 sub-checks).
+    syntax_findings = check_app_build_gradle_syntax_v2()
     if syntax_findings:
         all_findings.extend(syntax_findings)
     else:
-        print("PASS: app/build.gradle.kts Kotlin DSL syntax (explicit java.util.Properties import)")
+        print("PASS: app/build.gradle.kts Kotlin DSL syntax v2 (S1-S5: imports + deprecated kotlinOptions absence + new kotlin compilerOptions presence)")
 
     if all_findings:
         print("\nFINDINGS:")
         for f in all_findings:
             print(f"  - {f}")
         return 1
-    print("\nALL 4 WORKFLOWS + GRADLE WRAPPER + AGP + KOTLIN + SYNTAX PASS PyYAML AUDIT.")
+    print("\nALL 4 WORKFLOWS + GRADLE WRAPPER + AGP + KOTLIN + SYNTAX v2 PASS PyYAML AUDIT.")
     return 0
 
 
