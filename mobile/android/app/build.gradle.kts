@@ -1,6 +1,6 @@
-// mobile/android/app/build.gradle.kts
+﻿// mobile/android/app/build.gradle.kts
 //
-// PR-28 (Sprint 5) — Flutter app module build script.
+// PR-28 (Sprint 5) â€” Flutter app module build script.
 // Sprint 9.6.5 hotfix: Kotlin DSL syntax upgrade for Kotlin 2.0+ compatibility.
 //
 // Configures the `:app` subproject that hosts both the Flutter embedding
@@ -13,8 +13,8 @@
 //     bundling).
 //   - Applies the Kotlin Android plugin (lets Gradle compile the
 //     `mobile/android/app/src/main/kotlin/com/opene2ee/opene2ee/**/*.kt`
-//     sources — including `vpn/OpenE2eeVpnService.kt`).
-//   - Pins minSdk = 23 (Android 6.0 Marshmallow) — see SPRINT-7 §MOB-5
+//     sources â€” including `vpn/OpenE2eeVpnService.kt`).
+//   - Pins minSdk = 23 (Android 6.0 Marshmallow) â€” see SPRINT-7 Â§MOB-5
 //     rationale block below. targetSdk = 34 (Android 14, required for
 //     `foregroundServiceType="specialUse"`), compileSdk = 34.
 //   - Declares runtime deps: AndroidX core, AndroidX annotation (for
@@ -22,36 +22,36 @@
 //     kotlinx-coroutines-android (used by future async plumbing).
 //   - Distinguishes debug vs release signing configs. Debug uses the
 //     AGP-provided auto-generated debug keystore (no password needed,
-//     valid for one year — fine for sampling / on-device testing).
+//     valid for one year â€” fine for sampling / on-device testing).
 //     Release is empty unless the developer drops a keystore at
 //     `mobile/android/key.properties` (gitignored).
 //
-// ─── SPRINT-7 §MOB-5 — minSdk = 23 rationale (Android 6.0 Marshmallow)
-// ───────────────────────────────────────────────────────────────────
+// â”€â”€â”€ SPRINT-7 Â§MOB-5 â€” minSdk = 23 rationale (Android 6.0 Marshmallow)
+// â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 // History: PR-22a / PR-28 set minSdk = 21 (Lollipop) because that was
 // the floor for `VpnService.Builder.allowedApplications()` and
 // `.disallowedApplications()`. MOB-5 (cyber-security hand-off) found
 // this floor was BELOW the floor that flutter_secure_storage 9.x
 // requires for AndroidKeyStore-backed encryption:
 //
-//   • flutter_secure_storage 9.2.4 (pinned in pubspec.yaml) documents:
+//   â€¢ flutter_secure_storage 9.2.4 (pinned in pubspec.yaml) documents:
 //       "API Level: Android 6.0 (API 23) minimum for basic encryption"
 //     https://pub.dev/packages/flutter_secure_storage  (Requirements)
-//   • flutter_secure_storage 9.x changelog records:
+//   â€¢ flutter_secure_storage 9.x changelog records:
 //       "Minimum Android SDK changed from 19 to 23"
-//   • `android.security.keystore.KeyGenParameterSpec` (the modern
-//     AndroidKeyStore key-generation builder — supports PURPOSE_*,
+//   â€¢ `android.security.keystore.KeyGenParameterSpec` (the modern
+//     AndroidKeyStore key-generation builder â€” supports PURPOSE_*,
 //     BLOCK_MODE_*, ENCRYPTION_PADDING_*, user-auth requirements,
 //     randomized-encryption flag) was added in API 23.
 //     Pre-API-23 only had `KeyPairGeneratorSpec`, which lacks every
 //     one of those controls. flutter_secure_storage's AES master key
 //     cannot be created on API < 23 without falling back to software-
-//     only SharedPreferences — which would silently break the Ed25519
-//     private-key-at-rest guarantee that ADR-0006 §B1 relies on.
+//     only SharedPreferences â€” which would silently break the Ed25519
+//     private-key-at-rest guarantee that ADR-0006 Â§B1 relies on.
 //
-// Decision: bump minSdk from 21 → 23. This is preferred over
+// Decision: bump minSdk from 21 â†’ 23. This is preferred over
 // "attestation" (Option B in the Sprint 7 spec) because the API
-// literally does not exist on API < 23 — there is nothing to
+// literally does not exist on API < 23 â€” there is nothing to
 // attest to. It is preferred over "explicit failure at runtime"
 // (Option C) because end-users on Android 5.x would see a crash
 // with no recourse; refusing to install is more honest.
@@ -76,16 +76,16 @@
 //   - https://pub.dev/packages/flutter_secure_storage
 //   - docs/ADR-0003-vpn-layer.md
 //   - docs/ADR-0006-anonimlik.md (Ed25519 private-key-at-rest contract)
-//   - docs/SPRINT-7-SCOPE.md §Item 6 MOB-5
+//   - docs/SPRINT-7-SCOPE.md Â§Item 6 MOB-5
 //
-// ─── SPRINT-9.6.6 — Kotlin 2.0+ DSL import hygiene (Kotlin 2.2.20 + AGP 8.11.1)
-// ──────────────────────────────────────────────────────────────────────
+// â”€â”€â”€ SPRINT-9.6.6 â€” Kotlin 2.0+ DSL import hygiene (Kotlin 2.2.20 + AGP 8.11.1)
+// â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 // Sprint 9.6.5 partially fixed Kotlin 2.0+ DSL strictness (smart cast
 // `as String` removal, `variant` rename to `_`, `keyProps.getProperty(...)`
 // access) but TWO defects were left in place and a live workflow_dispatch
 // run AFTER Sprint 9.6.5 PR #16 push (origin/main @ e2b7055) failed with:
 //   (a) `kotlinOptions { jvmTarget = "17" }` is DEPRECATED in Kotlin
-//       2.0+ — the build emits a deprecation warning and AGP 8.11.1 +
+//       2.0+ â€” the build emits a deprecation warning and AGP 8.11.1 +
 //       Kotlin 2.2.20 treat the warning as an error in CI. The
 //       migration target is `kotlin { compilerOptions { jvmTarget
 //       .set(JvmTarget.JVM_17) } }`, which requires the explicit
@@ -93,7 +93,7 @@
 //   (b) The Sprint 9.6.5 comment claimed "explicit `import
 //       java.util.Properties`" but the file STILL uses the fully-
 //       qualified `java.util.Properties()` form at line 151. Kotlin
-//       2.0+ is stricter on implicit imports — the Kotlin compiler
+//       2.0+ is stricter on implicit imports â€” the Kotlin compiler
 //       rejects fully-qualified class names that are not preceded by
 //       an explicit `import` statement with:
 //         "Unresolved reference: util" (line 145, the class
@@ -119,7 +119,7 @@
 // Audit-script side (tools/workflow-yaml-audit.py): the Sprint 9.6.5
 // pair-check `check_app_build_gradle_syntax()` was a substring search
 // for `import java.util.Properties` and returned PASS when the
-// substring appeared INSIDE a comment — a false positive. Sprint
+// substring appeared INSIDE a comment â€” a false positive. Sprint
 // 9.6.6 fixes this by parsing actual `^import <pkg>` lines via
 // regex (ignoring line-comment and block-comment context).
 
@@ -157,8 +157,8 @@ android {
     }
 
     defaultConfig {
-        // Floor — API 23 (Android 6.0 Marshmallow) — see the SPRINT-7
-        // §MOB-5 rationale block at the top of this file. The two
+        // Floor â€” API 23 (Android 6.0 Marshmallow) â€” see the SPRINT-7
+        // Â§MOB-5 rationale block at the top of this file. The two
         // hard requirements that pin this floor are:
         //   (1) `android.security.keystore.KeyGenParameterSpec` (the
         //       AndroidKeyStore key-generation builder used by
@@ -187,11 +187,11 @@ android {
             // release block below can mirror its structure.
         }
 
-        // Release — empty by default. If a developer drops a
+        // Release â€” empty by default. If a developer drops a
         // `key.properties` file at `mobile/android/key.properties`
         // (see `.gitignore`), it is loaded here and a release
         // signing config is wired up. We deliberately do NOT fall
-        // back to the debug keystore for release builds — that
+        // back to the debug keystore for release builds â€” that
         // would silently ship APKls signed with the well-known
         // Android SDK debug key.
         create("release") {
@@ -200,7 +200,7 @@ android {
                 // Sprint 9.6.6: this block was partially fixed in
                 // Sprint 9.6.5 (smart-cast + `variant` rename) but
                 // the `import java.util.Properties` statement was
-                // NEVER added — only a comment claiming it was. A
+                // NEVER added â€” only a comment claiming it was. A
                 // live workflow_dispatch run AFTER Sprint 9.6.5 PR
                 // #16 push (origin/main @ e2b7055) failed at this
                 // line with:
@@ -219,7 +219,7 @@ android {
                 //      of the fully-qualified `java.util.Properties()`
                 //      here.
                 //   3. Using `load(keyPropsFile.inputStream())` with
-                //      implicit receiver — the `apply { ... }` block
+                //      implicit receiver â€” the `apply { ... }` block
                 //      provides `this` as the `Properties` receiver,
                 //      and `load(InputStream)` is a method on
                 //      `Properties`. With the explicit
@@ -229,7 +229,7 @@ android {
                 //      `keyProps.load(...)` with an explicit receiver,
                 //      but that references `keyProps` inside the
                 //      `apply { }` block BEFORE the variable is
-                //      initialized — a Kotlin compile error.)
+                //      initialized â€” a Kotlin compile error.)
                 val keyProps = Properties().apply {
                     load(keyPropsFile.inputStream())
                 }
@@ -264,10 +264,10 @@ android {
             } else {
                 signingConfigs.getByName("debug")
             }
-            // PR-39 (Sprint 6) — R8/ProGuard now enabled for release.
+            // PR-39 (Sprint 6) â€” R8/ProGuard now enabled for release.
             // Addresses cyber-security review finding MOB-3 (High):
             //   "Release builds ship with `isMinifyEnabled = false;
-            //    isShrinkResources = false` — full Kotlin symbol names +
+            //    isShrinkResources = false` â€” full Kotlin symbol names +
             //    dev-friendly stack traces land in the APK. OWASP
             //    MASVS-CODE-2 violation."
             //
@@ -304,10 +304,10 @@ flutter {
 // `jvmTarget.set(JvmTarget.JVM_17)` uses the strongly-typed
 // `JvmTarget` enum (imported at the top of this file) instead
 // of a String "17". The block is a SIBLING of `android { }`,
-// not nested inside it — this is the form AGP 8.11.1 +
+// not nested inside it â€” this is the form AGP 8.11.1 +
 // Kotlin 2.2.20 expect.
 //
-// Migration path (Sprint 5 → Sprint 9.6.6):
+// Migration path (Sprint 5 â†’ Sprint 9.6.6):
 //   Sprint 5     : android { kotlinOptions { jvmTarget = "17" } }
 //   Sprint 9.6.6 : kotlin { compilerOptions { jvmTarget.set(JvmTarget.JVM_17) } }
 //
@@ -322,7 +322,7 @@ kotlin {
 }
 
 dependencies {
-    // Kotlin runtime — provided by the Kotlin Android plugin via
+    // Kotlin runtime â€” provided by the Kotlin Android plugin via
     // stdlib, declared explicitly so the Kotlin compiler can resolve
     // references like `kotlin.LazyThreadSafetyMode` from the VPN service.
     implementation("androidx.core:core-ktx:1.12.0")
@@ -332,9 +332,26 @@ dependencies {
     // PR-28 transient-service fix to keep `startForeground` callable on
     // API 34+ without the deprecation warning breaking CI.
     implementation("org.jetbrains.kotlinx:kotlinx-coroutines-android:1.7.3")
+
+    // Sprint 9.6.13 â€” Flutter engine embedding JAR (Kotlin side).
+    //
+    // The `id("dev.flutter.flutter-gradle-plugin")` plugin handles
+    // `compileFlutterBuildDebug` (Dart side) and pulls the engine in its own
+    // classpath, but `compileDebugKotlin` (Kotlin side, run by Android Gradle
+    // Plugin) needs the engine JAR on its classpath too. Without this
+    // dependency, every `io.flutter.embedding.*` and `io.flutter.plugin.*`
+    // import in `MainActivity.kt` and `OpenE2eeVpnService.kt` fails to
+    // resolve ("Unresolved reference 'embedding' / 'FlutterActivity' /
+    // 'FlutterEngine' / 'MethodChannel'").
+    //
+    // The version `1.0.0-<engine_commit>` is pinned to the Flutter SDK's
+    // engine.version file so the Kotlin side and Dart side always agree.
+    // This dependency has been missing since PR-3; PR-28 (Sprint 5) set up
+    // the Flutter Gradle plugin but never declared the embedding JAR.
+    implementation("io.flutter:flutter_embedding_ktx:1.0.0-c416acfeb8126e097f758c664aaa3da929e27da0")
 }
 
-// Ensure the VPN service class file ends up in the compiled output —
+// Ensure the VPN service class file ends up in the compiled output â€”
 // defensive; AGP/Kotlin already pick up `src/main/kotlin` via the
 // sourceSets entry above, but a future rename or move is easier to
 // audit if we list the package here explicitly.

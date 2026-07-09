@@ -3,13 +3,14 @@ check_android_debug_workflow_v3 (S6),
 check_mobile_entry_point_v4 (S7),
 check_android_xml_comments_v5 (S8),
 check_android_manifest_v6 (S9),
-check_android_res_skeleton_v7 (S10), and
-check_flutter_plugins_dependencies_v8 (S11).
+check_android_res_skeleton_v7 (S10),
+check_flutter_plugins_dependencies_v8 (S11), and
+check_flutter_kotlin_embedding_v9 (S12).
 
 Per Architect brief (Sprint 9.6.6): "self-checks (negative test:
 revert + audit finds 4 FAIL)". Sprint 9.6.7 extends to S6.
 9.6.8 extends to S7. 9.6.9 extends to S8. 9.6.10 extends to S9.
-9.6.11 extends to S10. 9.6.12 extends to S11.
+9.6.11 extends to S10. 9.6.12 extends to S11. 9.6.13 extends to S12.
 
 S1-S5 cases: 6 (1 PASS + 5 FAIL, ...).
 S6 cases: 4 (1 PASS + 3 FAIL, ...).
@@ -20,8 +21,9 @@ S10 cases: 3 (1 PASS + 2 FAIL — styles.xml + mipmap +
 launch_background.xml).
 S11 cases: 3 (1 PASS + 2 FAIL — file missing + plugins.android
 empty array).
+S12 cases: 3 (1 PASS + 2 FAIL — dependency missing + wrong hash).
 
-Total: 25 cases.
+Total: 28 cases.
 """
 import sys
 from pathlib import Path
@@ -347,6 +349,72 @@ def run_s11_check(fpd_text: str | None) -> list[str]:
             findings.append("S11 fail")
         if not isinstance(entry.get("native_build"), bool):
             findings.append("S11 fail")
+    return findings
+
+
+def run_s12_check(app_gradle_text: str | None, engine_version: str | None) -> list[str]:
+    """Replicate check_flutter_kotlin_embedding_v9 logic on raw inputs.
+
+    Mirrors the audit's five-part S12 check:
+    (a) app/build.gradle.kts exists (signalled by
+        app_gradle_text != None),
+    (b) contains a `dependencies { ... }` block (regex match on
+        the keyword at line-start),
+    (c) `io.flutter:flutter_embedding_ktx` substring inside that
+        block,
+    (d) version follows the `1.0.0-<40-char-hex>` pattern,
+    (e) hash matches the engine_version string.
+
+    The audit reads files from disk + the Flutter SDK
+    engine.version file; the self-test takes both raw texts so a
+    single (app_gradle, engine_version) pair can drive all 3
+    cases (PASS / missing / wrong hash) without a temp file or
+    real Flutter SDK access.
+    """
+    import re
+    findings = []
+    if app_gradle_text is None:
+        findings.append("S12 fail")
+        return findings
+    # (b) find the dependencies block via balanced-brace walk.
+    dep_match = re.search(r"^\s*dependencies\s*\{", app_gradle_text, re.MULTILINE)
+    if not dep_match:
+        findings.append("S12 fail")
+        return findings
+    block_start = dep_match.end()
+    depth = 1
+    i = block_start
+    while i < len(app_gradle_text) and depth > 0:
+        c = app_gradle_text[i]
+        if c == "{":
+            depth += 1
+        elif c == "}":
+            depth -= 1
+        i += 1
+    if depth != 0:
+        findings.append("S12 fail")
+        return findings
+    block_text = app_gradle_text[block_start:i - 1]
+    # (c) substring inside the block.
+    if "io.flutter:flutter_embedding_ktx" not in block_text:
+        findings.append("S12 fail")
+        return findings
+    # (d) version pattern.
+    version_match = re.search(
+        r"io\.flutter:flutter_embedding_ktx:1\.0\.0-([0-9a-f]{40})",
+        block_text,
+    )
+    if not version_match:
+        findings.append("S12 fail")
+        return findings
+    declared_hash = version_match.group(1)
+    # (e) engine_version cross-check.
+    if engine_version is None or not re.match(r"^[0-9a-f]{40}$", engine_version):
+        findings.append("S12 fail")
+        return findings
+    if declared_hash != engine_version:
+        findings.append("S12 fail")
+        return findings
     return findings
 
 
@@ -812,6 +880,69 @@ case_s11_fpd_empty_android = """{
     }
 }"""
 
+# ─── S12 test cases (Sprint 9.6.13) ──────────────────────────────
+
+# Real Flutter 3.44.1 engine.version value (mirrors the local SDK
+# install; the audit reads this file and compares it to the hash
+# declared in app/build.gradle.kts). Used by ALL S12 cases.
+S12_ENGINE_VERSION = "c416acfeb8126e097f758c664aaa3da929e27da0"
+
+# Case 25 (S12 PASS): post-fix app/build.gradle.kts with the
+# flutter_embedding_ktx dependency declared at the correct hash.
+# Mirrors the real post-Sprint 9.6.13 file structure.
+case_s12_gradle_pass = """plugins {
+    id("com.android.application")
+    id("org.jetbrains.kotlin.android")
+    id("dev.flutter.flutter-gradle-plugin")
+}
+
+android {
+    namespace = "com.opene2ee.opene2ee"
+    compileSdk = 34
+}
+
+dependencies {
+    implementation("androidx.core:core-ktx:1.12.0")
+    implementation("androidx.annotation:annotation:1.7.1")
+    implementation("org.jetbrains.kotlinx:kotlinx-coroutines-android:1.7.3")
+    implementation("io.flutter:flutter_embedding_ktx:1.0.0-c416acfeb8126e097f758c664aaa3da929e27da0")
+}
+"""
+
+# Case 26 (S12 FAIL — dependency missing): app/build.gradle.kts
+# without the flutter_embedding_ktx line. Mirrors the 9.6.12
+# broken state (and earlier — missing since PR-3).
+case_s12_gradle_no_embedding = """plugins {
+    id("com.android.application")
+    id("org.jetbrains.kotlin.android")
+    id("dev.flutter.flutter-gradle-plugin")
+}
+
+android {
+    namespace = "com.opene2ee.opene2ee"
+    compileSdk = 34
+}
+
+dependencies {
+    implementation("androidx.core:core-ktx:1.12.0")
+    implementation("androidx.annotation:annotation:1.7.1")
+    implementation("org.jetbrains.kotlinx:kotlinx-coroutines-android:1.7.3")
+}
+"""
+
+# Case 27 (S12 FAIL — wrong hash): flutter_embedding_ktx declared
+# with a 40-char hex hash that does NOT match engine.version.
+# Tests the hash mismatch sub-check.
+case_s12_gradle_wrong_hash = """plugins {
+    id("com.android.application")
+}
+
+dependencies {
+    implementation("androidx.core:core-ktx:1.12.0")
+    implementation("io.flutter:flutter_embedding_ktx:1.0.0-deadbeefdeadbeefdeadbeefdeadbeefdeadbeef")
+}
+"""
+
 # ─── Run all cases ───────────────────────────────────────────────
 
 cases = [
@@ -866,6 +997,13 @@ cases = [
      run_s11_check, (None,), ["S11 fail"]),
     ("S11 FAIL (file exists but plugins.android[] is empty array — no Android plugins declared)",
      run_s11_check, (case_s11_fpd_empty_android,), ["S11 fail"]),
+    # S12 cases (Sprint 9.6.13 — new)
+    ("S12 PASS (app/build.gradle.kts declares io.flutter:flutter_embedding_ktx:1.0.0-<engine_commit> matching engine.version)",
+     run_s12_check, (case_s12_gradle_pass, S12_ENGINE_VERSION), []),
+    ("S12 FAIL (dependency missing entirely from dependencies block — Sprint 9.6.12 broken state, missing since PR-3)",
+     run_s12_check, (case_s12_gradle_no_embedding, S12_ENGINE_VERSION), ["S12 fail"]),
+    ("S12 FAIL (dependency declared with wrong hash — does not match Flutter SDK engine.version)",
+     run_s12_check, (case_s12_gradle_wrong_hash, S12_ENGINE_VERSION), ["S12 fail"]),
 ]   # noqa: E501
 
 failed = []

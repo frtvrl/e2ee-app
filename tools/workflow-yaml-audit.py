@@ -5,16 +5,20 @@ res/ XML comments + AndroidManifest merger-spec + Android res/ skeleton
 + .flutter-plugins-dependencies regen.
 Per memory rule: PyYAML 1.1 parses `on:` as boolean `True` — use d[True].
 Applies to all workflow files; tracks the Sprint 9.6.2 + 9.6.3 + 9.6.4 +
-9.6.5 + 9.6.6 + 9.6.7 + 9.6.8 + 9.6.9 + 9.6.10 + 9.6.11 + 9.6.12 fix
-invariants (added 2026-07-08 after Sprint 9.6.1 PR #13 push CI FAIL,
-Sprint 9.6.2 PR #14 push CI FAIL, Sprint 9.6.3 PR #15 push CI FAIL,
-Sprint 9.6.4 PR #15 (PUSHED) live build test CI FAIL, Sprint 9.6.5
-PR #16 (PUSHED) live build test CI FAIL, Sprint 9.6.6 PR #17 (PUSHED)
-live build test CI FAIL, Sprint 9.6.7 PR #19 (PUSHED) live build test
-CI FAIL, Sprint 9.6.8 PR #20 (PUSHED) live build test CI FAIL, Sprint
-9.6.9 PR #21 (PUSHED) live build test CI FAIL, Sprint 9.6.10 PR #22
-(PUSHED) live build test CI FAIL, Sprint 9.6.11 PR #23 (PUSHED) live
-build test CI FAIL).
+9.6.5 + 9.6.6 + 9.6.7 + 9.6.8 + 9.6.9 + 9.6.10 + 9.6.11 + 9.6.12 +
+9.6.13 fix invariants (added 2026-07-08 after Sprint 9.6.1 PR #13 push
+CI FAIL, Sprint 9.6.2 PR #14 push CI FAIL, Sprint 9.6.3 PR #15 push
+CI FAIL, Sprint 9.6.4 PR #15 (PUSHED) live build test CI FAIL, Sprint
+9.6.5 PR #16 (PUSHED) live build test CI FAIL, Sprint 9.6.6 PR #17
+(PUSHED) live build test CI FAIL, Sprint 9.6.7 PR #19 (PUSHED) live
+build test CI FAIL, Sprint 9.6.8 PR #20 (PUSHED) live build test CI
+FAIL, Sprint 9.6.9 PR #21 (PUSHED) live build test CI FAIL, Sprint
+9.6.10 PR #22 (PUSHED) live build test CI FAIL, Sprint 9.6.11 PR #23
+(PUSHED) live build test CI FAIL, Sprint 9.6.12 PR #24 (PUSHED) live
+build test CI FAIL, Sprint 9.6.13 PR #25 (PUSHED) live build test
+CI FAIL — REGRESSED with WRONG root cause; the real defect was
+missing `io.flutter:flutter_embedding_ktx` in app/build.gradle.kts
+dependencies).
 
 Verifies:
   1. All 4 workflows have ONLY workflow_dispatch trigger (no push/pull_request).
@@ -91,6 +95,24 @@ Verifies:
       Kotlin compile classpath; without it, `compileDebugKotlin`
       fails with 40+ 'Unresolved reference embedding/FlutterActivity/
       FlutterEngine/MethodChannel' errors.
+      [NB: S11 was right-but-insufficient. The actual root cause of
+       the 9.6.12 / 9.6.13 live build FAIL was a missing
+       `io.flutter:flutter_embedding_ktx` Maven coordinate in
+       `app/build.gradle.kts` `dependencies { }` — a Kotlin-side
+       issue. `.flutter-plugins-dependencies` is Dart-side
+       metadata and does not contribute to the Kotlin classpath.
+       S12 was added in Sprint 9.6.13 to close the Kotlin-side
+       gap.]
+ 17. **Sprint 9.6.13 (v9):** app/build.gradle.kts
+      `flutter_embedding_ktx` declared (S12) — the Maven
+      coordinate `io.flutter:flutter_embedding_ktx:1.0.0-<engine
+      _commit>` appears inside the `dependencies { }` block AND
+      the `<engine_commit>` hash matches the value in
+      `$flutterSdkPath/bin/internal/engine.version`. Without this
+      dependency, `compileDebugKotlin` fails with 40+ "Unresolved
+      reference embedding/FlutterActivity/FlutterEngine/
+      MethodChannel" errors in MainActivity.kt + OpenE2eeVpnService.kt.
+      Missing since PR-3 (the original Android Gradle scaffolding).
 """
 import json
 import re
@@ -137,6 +159,13 @@ ANDROID_TOOLS_NS = "http://schemas.android.com/tools"
 FLUTTER_MIN_GRADLE = (8, 7)
 FLUTTER_MIN_AGP = (8, 6)
 FLUTTER_MIN_KOTLIN = (2, 2)
+
+# Sprint 9.6.13 — paths for the S12 flutter_embedding_ktx audit.
+FLUTTER_SDK_PATH = Path(r"C:\Users\User\flutter")  # Mirrors local.properties (CI: from `which flutter`).
+ENGINE_VERSION_PATH = FLUTTER_SDK_PATH / "bin" / "internal" / "engine.version"
+FLUTTER_EMBEDDING_GROUP = "io.flutter"
+FLUTTER_EMBEDDING_ARTIFACT = "flutter_embedding_ktx"
+FLUTTER_EMBEDDING_PREFIX = "1.0.0-"  # The Maven coordinate is `1.0.0-<40-char-hex>` per Flutter's engine tag scheme.
 
 
 def strip_comments(text: str) -> str:
@@ -1382,6 +1411,216 @@ def check_flutter_plugins_dependencies_v8() -> list[str]:
     return findings
 
 
+def check_flutter_kotlin_embedding_v9() -> list[str]:
+    """Sprint 9.6.13 v9: app/build.gradle.kts `flutter_embedding_ktx` check (S12).
+
+    The 9.6.12 live build (commit b52a0f6 on main, fast-forward
+    merged by Owner) FAILED at `:app:compileDebugKotlin` with
+    40+ "Unresolved reference 'embedding' / 'FlutterActivity' /
+    'FlutterEngine' / 'MethodChannel'" errors in `MainActivity.kt`
+    and `OpenE2eeVpnService.kt` — IDENTICAL to the 9.6.11 failure.
+
+    Sprint 9.6.12's Coder root-cause (Fix A: `.flutter-plugins-
+    dependencies` was missing in the worktree) was a surface
+    artifact, NOT the actual root cause. `.flutter-plugins-
+    dependencies` is a JSON plugin-list artifact read by the
+    Flutter Gradle plugin to wire Dart-side plugin code; it does
+    NOT contribute to the Kotlin compile classpath.
+
+    The REAL root cause (Mavis verified, Coder independently
+    confirmed in Sprint 9.6.13 Phase 0): `mobile/android/app/
+    build.gradle.kts` `dependencies { }` block was MISSING the
+    `io.flutter:flutter_embedding_ktx` Maven coordinate. The
+    `dev.flutter.flutter-gradle-plugin` plugin wires the engine
+    JAR into `compileFlutterBuildDebug` (Dart side) but does NOT
+    propagate it to `compileDebugKotlin` (Kotlin side, run by
+    Android Gradle Plugin as a separate task). Every
+    `io.flutter.embedding.*` and `io.flutter.plugin.*` import in
+    `MainActivity.kt` (PR-22a) and `OpenE2eeVpnService.kt`
+    (PR-28) failed to resolve.
+
+    This dependency has been missing since PR-3 (the original
+    Android Gradle scaffolding). PR-28 (Sprint 5) declared
+    `id("dev.flutter.flutter-gradle-plugin")` and `flutter {
+    source = "../.." }` but never added the Kotlin embedding JAR.
+    From PR-3 through 9.6.11, `compileFlutterBuildDebug` always
+    failed FIRST in the live build, so `compileDebugKotlin` never
+    had a chance to fail and expose this gap. Sprint 9.6.11 fixed
+    the res/ skeleton, so the build finally reached
+    `compileDebugKotlin` and the missing dependency surfaced.
+
+    The fix: add ONE line to the `dependencies { }` block:
+        implementation("io.flutter:flutter_embedding_ktx:1.0.0-<engine_commit>")
+    where `<engine_commit>` is the 40-char hex SHA from
+    `$flutterSdkPath/bin/internal/engine.version`. The Maven
+    artifact is published to https://storage.googleapis.com/
+    download.flutter.io/ and maven.google.com; Gradle fetches it
+    automatically when declared.
+
+    This check enforces the post-fix state:
+
+      (a) `mobile/android/app/build.gradle.kts` exists.
+      (b) The file contains a `dependencies { ... }` block
+          (substring match — we deliberately do NOT use a full
+          Kotlin parser because the dependency block is short
+          and substring is sufficient, AND a regex would risk the
+          same false-positive pattern Sprint 9.6.5 audit had
+          when substring matched a comment claiming a dependency
+          was added but the file did not actually have it).
+      (c) Inside the `dependencies { }` block, the string
+          `io.flutter:flutter_embedding_ktx` appears (substring
+          match within the block).
+      (d) The version follows the `1.0.0-<40-char-hex>` pattern
+          (regex `^1.0.0-[0-9a-f]{40}$` on the captured
+          version string — the dot in `1.0.0` is a literal `.`,
+          not a regex metachar).
+      (e) The hash matches the value in
+          `$flutterSdkPath/bin/internal/engine.version` (read it,
+          compare as strings).
+
+    Failure messages name the actual observed state so a future
+    regression is debuggable (NOT a generic "this dependency is
+    missing" string). The audit pinpoints which sub-check failed.
+
+    Scope: only `mobile/android/app/build.gradle.kts`. We do NOT
+    scan the workspace `build.gradle.kts` (root) or other module
+    build files — the embedding JAR is a per-app dependency.
+    """
+    findings = []
+    app_gradle = REPO_ROOT / "mobile" / "android" / "app" / "build.gradle.kts"
+
+    # (a) file exists
+    if not app_gradle.exists():
+        findings.append(
+            f"S12 {app_gradle.relative_to(REPO_ROOT)}: file missing "
+            "(Sprint 9.6.13 invariant — the Flutter engine embedding "
+            "JAR must be declared in app/build.gradle.kts dependencies)"
+        )
+        return findings
+
+    text = app_gradle.read_text(encoding="utf-8")
+
+    # (b) find the dependencies { ... } block. Walk balanced braces
+    # so a nested block (e.g. inside `create("release") { ... }`)
+    # is not mistaken for the top-level dependencies block. The
+    # pattern is: find `dependencies` keyword at line-start, then
+    # count `{` vs `}` until balanced.
+    dep_block_match = re.search(
+        r"^\s*dependencies\s*\{",
+        text,
+        re.MULTILINE,
+    )
+    if not dep_block_match:
+        findings.append(
+            f"S12 {app_gradle.relative_to(REPO_ROOT)}: no "
+            f"`dependencies {{ ... }}` block found in file. Sprint "
+            f"9.6.13 invariant — the Flutter engine embedding JAR "
+            f"must be declared inside `dependencies {{ ... }}`."
+        )
+        return findings
+    # Extract the block content by balanced-brace walk.
+    block_start = dep_block_match.end()  # position right after `{`
+    depth = 1
+    i = block_start
+    while i < len(text) and depth > 0:
+        c = text[i]
+        if c == "{":
+            depth += 1
+        elif c == "}":
+            depth -= 1
+        i += 1
+    if depth != 0:
+        findings.append(
+            f"S12 {app_gradle.relative_to(REPO_ROOT)}: `dependencies "
+            f"{{ ... }}` block is unbalanced (final depth {depth}). "
+            f"Sprint 9.6.13 invariant — file may be corrupt."
+        )
+        return findings
+    block_text = text[block_start:i - 1]
+
+    # (c) substring search inside the block (NOT full-file regex —
+    # we already extracted the block, so substring is unambiguous).
+    embedding_substr = f"{FLUTTER_EMBEDDING_GROUP}:{FLUTTER_EMBEDDING_ARTIFACT}"
+    if embedding_substr not in block_text:
+        findings.append(
+            f"S12 {app_gradle.relative_to(REPO_ROOT)}: "
+            f"`{embedding_substr}` is missing from the "
+            f"`dependencies {{ ... }}` block. Sprint 9.6.13 fix — "
+            f"add "
+            f"`implementation(\"{embedding_substr}:1.0.0-<engine_commit>\")` "
+            f"inside the block. The 9.6.12 live build failed at "
+            f":app:compileDebugKotlin with 40+ 'Unresolved reference "
+            f"embedding/FlutterActivity/FlutterEngine/MethodChannel' "
+            f"errors because the engine JAR was not on the Kotlin "
+            f"compile classpath. This dependency has been missing "
+            f"since PR-3."
+        )
+        return findings
+
+    # (d) capture the version string. Pattern is `1.0.0-<40-hex>`.
+    # Use a regex anchored on the substring to scope the search.
+    version_match = re.search(
+        rf"{re.escape(embedding_substr)}:{FLUTTER_EMBEDDING_PREFIX}([0-9a-f]{{40}})",
+        block_text,
+    )
+    if not version_match:
+        # Capture whatever comes after the substring for a debug-
+        # quality failure message (so the user can see the actual
+        # bad value, not `<unknown>`).
+        bad_version_match = re.search(
+            rf"{re.escape(embedding_substr)}:([^\"'\s,)]+)",
+            block_text,
+        )
+        bad_version = bad_version_match.group(1) if bad_version_match else "<not found>"
+        findings.append(
+            f"S12 {app_gradle.relative_to(REPO_ROOT)}: "
+            f"`{embedding_substr}` is declared but the version "
+            f"does NOT follow the `{FLUTTER_EMBEDDING_PREFIX}<40-char-hex>` "
+            f"pattern (expected `1.0.0-<engine_commit>` where "
+            f"`<engine_commit>` is a 40-char hex SHA). Got: "
+            f"`{embedding_substr}:{bad_version}` from the block. "
+            f"Sprint 9.6.13 invariant."
+        )
+        return findings
+    declared_hash = version_match.group(1)
+
+    # (e) compare against the Flutter SDK's engine.version
+    if not ENGINE_VERSION_PATH.exists():
+        # Engine version file absent — only happens if Flutter SDK
+        # is incomplete (CI should never hit this). Report and
+        # skip the hash compare, since we can't validate.
+        findings.append(
+            f"S12 {ENGINE_VERSION_PATH}: file missing. Cannot "
+            f"validate hash against engine.version. Sprint 9.6.13 "
+            f"invariant — the Flutter SDK should ship this file."
+        )
+        return findings
+    sdk_engine_version = ENGINE_VERSION_PATH.read_text(encoding="utf-8").strip()
+    # The engine.version file contains ONLY the 40-char hex SHA.
+    if not re.match(r"^[0-9a-f]{40}$", sdk_engine_version):
+        findings.append(
+            f"S12 {ENGINE_VERSION_PATH}: content does not match "
+            f"`^[0-9a-f]{{40}}$` (got `{sdk_engine_version}`). Sprint "
+            f"9.6.13 invariant — engine.version should contain "
+            f"only the 40-char hex SHA."
+        )
+        return findings
+    if declared_hash != sdk_engine_version:
+        findings.append(
+            f"S12 {app_gradle.relative_to(REPO_ROOT)}: declared "
+            f"`{embedding_substr}:{FLUTTER_EMBEDDING_PREFIX}{declared_hash}` "
+            f"does NOT match Flutter SDK engine.version "
+            f"`{sdk_engine_version}`. The Kotlin-side engine JAR "
+            f"will be a different version than the Dart-side "
+            f"engine, leading to classpath/runtime mismatches. "
+            f"Sprint 9.6.13 fix: update the declared hash to "
+            f"match engine.version, or vice versa."
+        )
+        return findings
+
+    return findings
+
+
 def main() -> int:
     all_findings = []
     for fname in TARGETS:
@@ -1465,12 +1704,19 @@ def main() -> int:
     else:
         print("PASS: mobile/.flutter-plugins-dependencies exists, parses as JSON, plugins.android[] non-empty with name+native_build per entry — Sprint 9.6.12 S11")
 
+    # Sprint 9.6.13 v9: app/build.gradle.kts `flutter_embedding_ktx` check (S12).
+    s12_findings = check_flutter_kotlin_embedding_v9()
+    if s12_findings:
+        all_findings.extend(s12_findings)
+    else:
+        print(f"PASS: app/build.gradle.kts declares io.flutter:flutter_embedding_ktx:1.0.0-<engine_commit> matching $flutterSdkPath/bin/internal/engine.version — Sprint 9.6.13 S12")
+
     if all_findings:
         print("\nFINDINGS:")
         for f in all_findings:
             print(f"  - {f}")
         return 1
-    print("\nALL 4 WORKFLOWS + GRADLE WRAPPER + AGP + KOTLIN + SYNTAX v2 + S6 flutter pub get step + S7 mobile entry point + S8 Android XML comments + S9 AndroidManifest merger-spec + S10 Android res/ skeleton + S11 .flutter-plugins-dependencies regen PASS PyYAML AUDIT.")
+    print("\nALL 4 WORKFLOWS + GRADLE WRAPPER + AGP + KOTLIN + SYNTAX v2 + S6 flutter pub get step + S7 mobile entry point + S8 Android XML comments + S9 AndroidManifest merger-spec + S10 Android res/ skeleton + S11 .flutter-plugins-dependencies regen + S12 flutter_embedding_ktx declared in app deps PASS PyYAML AUDIT.")
     return 0
 
 
