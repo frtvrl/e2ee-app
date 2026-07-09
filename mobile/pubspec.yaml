@@ -1,5 +1,5 @@
 name: opene2ee
-description: "OpenE2EE - E2EE transparency tool"
+description: "A new Flutter project."
 # The following line prevents the package from being accidentally published to
 # pub.dev using `flutter pub publish`. This is preferred for private packages.
 publish_to: 'none' # Remove this line if you wish to publish to pub.dev
@@ -35,60 +35,6 @@ dependencies:
   # Use with the CupertinoIcons class for iOS style icons.
   cupertino_icons: ^1.0.8
 
-  # PR-9: shared core — device identity (Ed25519, UUID v7), telemetry, REST client.
-  # See docs/ADR-0006-anonimlik.md for the privacy contract these enforce.
-  pointycastle: ^3.9.1           # General-purpose crypto (SecureRandom, SHA helpers)
-  ed25519_edwards: ^0.3.1        # RFC 8032 Ed25519 sign/verify (pure Dart; pc-dart 3.9.1 lacks Ed25519)
-  flutter_secure_storage: ^9.2.4 # Keystore (Android) / Keychain (iOS) for the private key
-  dio: ^5.7.0                    # REST client with X-API-Version header + 401/429 handling
-  uuid: ^4.5.1                   # UUID v7 (time-ordered, 74-bit random suffix)
-
-  # PR-S7-MOB-10: biometric prompt (FaceID / TouchID / fingerprint) for
-  # sensitive operations. Pinned to ^2.3.0 — that is the last 2.x release
-  # with the public API used by `lib/mobile/auth/biometric.dart`
-  # (`LocalAuthentication.authenticate(localizedReason, biometricOnly,
-  # sensitiveTransaction, persistAcrossBackgrounding)`). 3.x removed the
-  # `sensitiveTransaction` flag and renamed it; we intentionally stay on
-  # 2.x for the MOB-10 hardening scope. See cyber-security Sprint 7
-  # review (2026-07-07) finding MOB-10.
-  local_auth: ^2.3.0
-
-  # PR-11: web dashboard — fl_chart BarChart + LineChart widgets.
-  # Pinned to 0.69.x: that release is the last one where `LineChart`'s
-  # `LineChartData` `lineBarsData` and `BarChart`'s `BarChartData`
-  # `barGroups` use the simple positional models documented in
-  # HANDOFF §4.2 PR-11. Newer majors (>= 1.0) renamed and retyped
-  # several fields.
-  fl_chart: ^0.69.2
-
-  # PR-21b: WebRTC plugin — Sprint 3 Flutter side of the PR-21a Go
-  # signaling surface. Bumped to ^1.5.x in Sprint 7 (MOB-14/SCA-10):
-  # ^0.10.8 ships libwebrtc m104 which has known transitive CVEs in
-  # libwebrtc's bundled components (SCA-10). 1.5.2 (Jun 2026) ships
-  # libwebrtc m144.7559.09 + WebRTC-SDK 144.7559.09 (Android/Darwin),
-  # closing the dependency CVE chain. The Dart-side API surface
-  # consumed by `lib/shared/webrtc_client.dart`
-  # (RTCPeerConnection.createPeerConnection/{createOffer,createAnswer,
-  # setLocalDescription,setRemoteDescription,addCandidate,close},
-  # RTCIceCandidate, RTCSessionDescription, RTCDataChannel /
-  # RTCDataChannelInit, RTCDataChannelMessage(text|binary), and
-  # RTCPeerConnectionState enum) is unchanged between 0.10.8 and
-  # 1.5.2 — see notes/ADR pinned at Sprint 7 PR-41.
-  flutter_webrtc: ^1.5.2
-
-  # PR-S9.6.8 — app shell wiring (Sprint 9.6.8, the first app-shell
-  # sprint after 7 CI/toolchain-only sprints in the 9.6.x chain).
-  # Pinned to ^2.5.1 / ^14.2.7 (major.minor only, matching the
-  # existing pin style in this file — patch updates are picked up
-  # automatically by `flutter pub upgrade`). See:
-  #   * lib/main.dart — `ProviderScope` wrapping `MyApp`.
-  #   * lib/app.dart — `MaterialApp.router` + theme.
-  #   * lib/router/app_router.dart — `go_router` 5-route table.
-  # Audit S7 (`tools/workflow-yaml-audit.py` check_mobile_entry_point_v4)
-  # enforces these two deps are present in this file.
-  flutter_riverpod: ^2.5.1
-  go_router: ^14.2.7
-
 dev_dependencies:
   flutter_test:
     sdk: flutter
@@ -99,9 +45,6 @@ dev_dependencies:
   # package. See that file for information about deactivating specific lint
   # rules and activating additional ones.
   flutter_lints: ^6.0.0
-
-  # PR-9 test support — mock secure storage without touching the real Keystore/Keychain.
-  mocktail: ^1.0.4
 
 # For information on the generic Dart part of this file, see the
 # following page: https://dart.dev/tools/pub/pubspec
@@ -136,7 +79,7 @@ flutter:
   #       - asset: fonts/Schyler-Regular.ttf
   #       - asset: fonts/Schyler-Italic.ttf
   #         style: italic
-  #   - family: Trajan
+  #   - family: Trajan Pro
   #     fonts:
   #       - asset: fonts/TrajanPro.ttf
   #       - asset: fonts/TrajanPro_Bold.ttf

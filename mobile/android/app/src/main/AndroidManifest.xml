@@ -1,90 +1,8 @@
-<?xml version="1.0" encoding="utf-8"?>
-<!--
-  PR-22a (Sprint 3) — Android Manifest for the OpenE2EE Android app.
-
-  This Manifest declares:
-    - INTERNET + ACCESS_NETWORK_STATE: required to reach the backend
-      over the protected network for telemetry uploads.
-    - FOREGROUND_SERVICE: required to run the VPN Service in the
-      background while in a sampling session.
-    - FOREGROUND_SERVICE_SPECIAL_USE: Android 14+ (API 34) requirement
-      for VPN services not classified as "system" — see
-      docs/ADR-0003-vpn-layer.md risk B2.
-    - POST_NOTIFICATIONS: Android 13+ (API 33) runtime permission
-      required to show the foreground-service notification.
-    - The OpenE2eeVpnService entry with foregroundServiceType=specialUse
-      and BIND_VPN_SERVICE permission so the system can hand us a TUN.
-    - The MainActivity entry that owns the VpnService.prepare() /
-      onActivityResult(RESULT_OK) handshake.
-
-  Privacy note: we deliberately do NOT request READ_PHONE_STATE,
-  READ_PRIVILEGED_PHONE_STATE, READ_PHONE_NUMBERS, BLUETOOTH_CONNECT,
-  or any other device-identifier permission. Per docs/ADR-0006 these
-  identifiers are forbidden.
--->
-<manifest xmlns:android="http://schemas.android.com/apk/res/android"
-          xmlns:tools="http://schemas.android.com/tools">
-
-    <uses-permission android:name="android.permission.INTERNET" />
-    <uses-permission android:name="android.permission.ACCESS_NETWORK_STATE" />
-    <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
-    <uses-permission android:name="android.permission.FOREGROUND_SERVICE_SPECIAL_USE" />
-
-    <!--
-      Sprint 7 Item 15 / MOB-10 — Biometric prompt (fingerprint / face)
-      permission. Required for Android `BiometricPrompt` (API 28+); the
-      deprecated `USE_FINGERPRINT` permission is intentionally NOT
-      requested — `USE_BIOMETRIC` is the canonical API-28+ replacement
-      and is a superset of the legacy fingerprint permission.
-
-      Privacy contract: this permission lets the OS prompt the user for
-      a biometric factor; it does NOT grant the app access to biometric
-      data (which never leaves the Trusted Execution Environment). The
-      prompt is gated by `biometricOnly: true` in
-      `lib/mobile/auth/biometric.dart` so passcode / PIN / pattern
-      cannot be used as a fallback factor — see ADR-0006 §"Veri
-      Minimizasyonu" (passcode IS PII).
-
-      Regression-guarded by `mobile/test/mobile/security/
-      biometric_posture_test.dart`.
-    -->
-    <uses-permission android:name="android.permission.USE_BIOMETRIC" />
-
-    <!--
-      Android 13+ (API 33) requires this runtime permission to show the
-      foreground-service notification tied to the VPN sampling session.
-      Declared with usesPermissionFlags="neverForLocation" because we do
-      not derive any location from the notification interaction.
-    -->
-    <uses-permission android:name="android.permission.POST_NOTIFICATIONS"
-        android:usesPermissionFlags="neverForLocation" />
-
-    <!--
-      Sprint 9.6.10 — `tools:replace` (was `tools:remove`) per Sprint 6
-      cyber-security review MOB-1 + Sprint 7 PR-39 follow-up. The
-      Android manifest merger refuses `tools:remove` co-existing
-      with an explicit `android:usesCleartextTraffic` declaration
-      ("tools:remove specified at line:63 for attribute
-      android:usesCleartextTraffic, but attribute also declared at
-      line:68"). The correct directive for "our value wins on
-      library merge" is `tools:replace`. AGP 8.11.1 enforces this at
-      processDebugMainManifest time.
-    -->
+<manifest xmlns:android="http://schemas.android.com/apk/res/android">
     <application
-        android:label="OpenE2EE"
+        android:label="opene2ee"
         android:name="${applicationName}"
-        android:icon="@mipmap/ic_launcher"
-        android:enableOnBackInvokedCallback="true"
-        android:usesCleartextTraffic="false"
-        tools:replace="android:usesCleartextTraffic"
-        android:networkSecurityConfig="@xml/network_security_config">
-
-        <!--
-          MainActivity — owns the VPN permission handshake
-          (startActivityForResult → VpnService.prepare() → RESULT_OK).
-          LaunchMode is singleTop so subsequent MethodChannel invocations
-          re-use the existing instance instead of stacking new ones.
-        -->
+        android:icon="@mipmap/ic_launcher">
         <activity
             android:name=".MainActivity"
             android:exported="true"
@@ -94,55 +12,34 @@
             android:configChanges="orientation|keyboardHidden|keyboard|screenSize|smallestScreenSize|locale|layoutDirection|fontScale|screenLayout|density|uiMode"
             android:hardwareAccelerated="true"
             android:windowSoftInputMode="adjustResize">
+            <!-- Specifies an Android theme to apply to this Activity as soon as
+                 the Android process has started. This theme is visible to the user
+                 while the Flutter UI initializes. After that, this theme continues
+                 to determine the Window background behind the Flutter UI. -->
             <meta-data
-                android:name="io.flutter.embedding.android.NormalTheme"
-                android:resource="@style/NormalTheme" />
+              android:name="io.flutter.embedding.android.NormalTheme"
+              android:resource="@style/NormalTheme"
+              />
             <intent-filter>
-                <action android:name="android.intent.action.MAIN" />
-                <category android:name="android.intent.category.LAUNCHER" />
+                <action android:name="android.intent.action.MAIN"/>
+                <category android:name="android.intent.category.LAUNCHER"/>
             </intent-filter>
         </activity>
-
-        <!--
-          OpenE2eeVpnService — the Android VpnService implementation.
-
-          android:permission="android.permission.BIND_VPN_SERVICE" restricts
-          who can bind to this service to the system (so only the OS VPN
-          framework can deliver a TUN descriptor). android:exported="true"
-          is required for the VPN framework to bind to us.
-
-          android:foregroundServiceType="specialUse" is the Android 14+
-          requirement for VPN services that don't fall under the system
-          category. The <property> tag explains the special use case.
-        -->
-        <service
-            android:name="com.opene2ee.opene2ee.vpn.OpenE2eeVpnService"
-            android:exported="true"
-            android:permission="android.permission.BIND_VPN_SERVICE"
-            android:foregroundServiceType="specialUse">
-            <property
-                android:name="android.app.PROPERTY_SPECIAL_USE_FGS_SUBTYPE"
-                android:value="network_diagnostic_sampling_for_e2ee_proof" />
-            <intent-filter>
-                <action
-                    android:name="android.net.VpnService"
-                    android:permission="android.permission.BIND_VPN_SERVICE" />
-            </intent-filter>
-        </service>
-
+        <!-- Don't delete the meta-data below.
+             This is used by the Flutter tool to generate GeneratedPluginRegistrant.java -->
         <meta-data
             android:name="flutterEmbedding"
             android:value="2" />
     </application>
+    <!-- Required to query activities that can process text, see:
+         https://developer.android.com/training/package-visibility and
+         https://developer.android.com/reference/android/content/Intent#ACTION_PROCESS_TEXT.
 
-    <!--
-      Flutter's VpnService.prepare() intent — emitted by MainActivity when
-      the user opts in. We declare the queries so Android 11+ package
-      visibility rules let us call startActivity with the prepare intent.
-    -->
+         In particular, this is used by the Flutter engine in io.flutter.plugin.text.ProcessTextPlugin. -->
     <queries>
         <intent>
-            <action android:name="android.net.VpnService" />
+            <action android:name="android.intent.action.PROCESS_TEXT"/>
+            <data android:mimeType="text/plain"/>
         </intent>
     </queries>
 </manifest>

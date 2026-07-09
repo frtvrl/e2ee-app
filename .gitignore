@@ -123,6 +123,21 @@ out/
 **/android/key.properties
 **/*.jks
 
+# Sprint 9.7.0 Item 1 (foundation) — Gradle wrapper re-include.
+# The default `flutter create --platforms=android` template (and
+# the pre-9.7.0 e2ee-app main .gitignore pattern) excludes the
+# Gradle wrapper files. For a buildable CLEAN refactor, the
+# wrapper must be committed (see mobile/android/.gitignore for
+# the local un-ignore rules + the rationale block). The
+# repo-root un-ignore rules below are the belt to the
+# Android-level braces: the patterns above still apply, but the
+# `!` lines re-include the wrapper artifacts on disk. This
+# matches the documented sprint-9.5 hotfix that originally
+# inverted the wrapper jar exclusion for CI reproducibility.
+!**/android/gradlew
+!**/android/gradlew.bat
+!**/android/gradle/wrapper/gradle-wrapper.jar
+
 # IDE files (Flutter)
 **/*.iml
 **/*.ipr
