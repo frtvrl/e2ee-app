@@ -85,10 +85,17 @@ class AppConfig {
     defaultValue: 'https://api-test.opene2ee.com',
   );
 
-  /// Sprint 10.1D — API version prefix (`v1` for the JWT-auth
-  /// endpoints). Hard-coded for now; promoted to a
-  /// build-time injectable when the backend ships v2.
-  static const String apiVersion = 'v1';
+  /// Sprint 10.1D — API version (`1` per the backend BFF
+  /// router, NOT `v1` — the backend's `X-API-Version`
+  /// validator expects the bare integer). Confirmed live
+  /// by Owner-supplied curl probe on 10.07.2026 22:40:
+  /// sending `X-API-Version: v1` returns
+  ///   `{"code":"invalid_header","message":"Unsupported
+  ///   X-API-Version; expected one of: 1"}`
+  /// while `X-API-Version: 1` returns a real JWT.
+  /// Hard-coded for now; promoted to a build-time
+  /// injectable when the backend ships v2.
+  static const String apiVersion = '1';
 }
 
 // ─── Backwards-compat aliases (Sprint 10.1C) ────────────────────
