@@ -146,6 +146,7 @@ jobs:
         # `flutter pub get` transitively if this step is skipped —
         # doing it explicitly makes the failure mode predictable.
         working-directory: mobile
+        run: flutter pub get
 
       - name: Verify Gradle wrapper
         # Defensive: confirm `./gradlew` exists and is executable. The
