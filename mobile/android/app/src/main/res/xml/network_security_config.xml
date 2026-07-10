@@ -65,54 +65,43 @@
     </base-config>
 
     <!--
-      Production CA pinning.
+      Production CA pinning — REMOVED in Sprint 9.7.0 Item 8.
 
-      MOB-8 (Sprint 7): the placeholder pin-set is now live (was kept
-      commented out in PR-39 to avoid bricking pre-launch dev builds).
+      MOB-8 (Sprint 7) attempted to activate the pin-set (was kept
+      commented out in PR-39 to avoid bricking pre-launch dev builds),
+      but the SHA-256 values in the original commit were PLACEHOLDER
+      text strings, not real base-64 SPKI hashes:
 
-      Two pins are listed per domain:
-        - Primary:  current production CA SPKI SHA-256 (base-64).
-        - Backup:   secondary CA / cross-signed SPKI SHA-256 (base-64).
+        <pin digest="SHA-256">PLACEHOLDER_PRODUCTION_CA_SPKI_SHA256_BASE64==</pin>
+        <pin digest="SHA-256">PLACEHOLDER_BACKUP_CA_SPKI_SHA256_BASE64==</pin>
 
-      A pin mismatch hard-fails the TLS handshake. The "primary +
-      backup" overlap is what lets us rotate the production CA without
-      shipping a new app version: clients connecting with the new CA's
-      SPKI still find a match until the old pin is removed.
+      Android's NetworkSecurityConfig parser calls `Base64.decode` on
+      every pin digest at application start (line XmlConfigSource.java:107).
+      `Base64.decode("PLACEHOLDER...")` throws `IllegalArgumentException:
+      bad base-64`, which surfaces as a `RuntimeException: Failed to
+      parse XML configuration from network_security_config`, which
+      Android wraps as `Unable to instantiate application`. The app
+      crashes BEFORE MainActivity.onCreate runs — so no Dart code
+      ever executes on a device.
 
-      Failure mode: if NO listed pin matches, TLS is refused. This is
-      the intended "fail-closed" stance (MASVS-NETWORK-1 + cyber-security
-      Sprint 7 review, finding MOB-8).
+      Sprint 9.7.0 Item 8 fix: drop the entire `<domain-config>` block
+      (including the `<pin-set>` and its placeholder pins). The base
+      config above still enforces:
+        - `cleartextTrafficPermitted="false"` (HTTPS-only)
+        - `<trust-anchors src="system"/>` (no user-installed CAs)
+      so the MOB-1 / MOB-2 stance from cyber-security Sprint 6 is
+      preserved. Only MOB-8 cert pinning is removed.
 
-      `expiration` is a HARD date by which the pin-set MUST be replaced.
-      Android documents this as a fail-stop date — past this day, the
-      TLS handshake fails regardless of any cert presented. Operators
-      must extend / replace the pin-set before expiry.
+      TODO(release-readiness): re-add a real `<pin-set>` here with
+      ACTUAL production CA SPKI SHA-256 base-64 hashes BEFORE public
+      launch. The placeholder pattern must NEVER come back. Rotation
+      procedure (full): docs/SPRINT-7-MOB-8-CERT-PINNING.md.
 
-      Rotation procedure (full): docs/SPRINT-7-MOB-8-CERT-PINNING.md.
-      Quick summary:
-        1. Obtain the new CA's SPKI SHA-256:
-             `openssl x509 -in new-ca.pem -pubkey -noout \
-                | openssl pkey -pubin -outform DER \
-                | openssl dgst -sha256 -binary | base64`
-        2. Append the new pin alongside the existing pins (overlap).
-        3. Ship via app update.
-        4. After 90 days (or when the old CA is decommissioned),
-           drop the old pin.
-        5. Update `expiration` to the new "hard fail" date.
+      Quick how-to-compute:
+        openssl x509 -in prod-ca.pem -pubkey -noout \
+          | openssl pkey -pubin -outform DER \
+          | openssl dgst -sha256 -binary | base64
     -->
-    <domain-config>
-        <domain includeSubdomains="true">api.opene2ee.com</domain>
-        <domain includeSubdomains="true">staging.opene2ee.com</domain>
-        <pin-set expiration="2027-07-07">
-            <!-- Primary SPKI SHA-256 (base-64). REPLACE before public
-                 launch — operator-side rotation only. -->
-            <pin digest="SHA-256">PLACEHOLDER_PRODUCTION_CA_SPKI_SHA256_BASE64==</pin>
-            <!-- Backup SPKI SHA-256 (base-64). Cross-signed / secondary
-                 CA kept in the list so a CA change does not require an
-                 app update. -->
-            <pin digest="SHA-256">PLACEHOLDER_BACKUP_CA_SPKI_SHA256_BASE64==</pin>
-        </pin-set>
-    </domain-config>
 
     <!--
       Dev-only cleartext exception for the Android emulator host
