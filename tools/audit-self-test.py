@@ -25,8 +25,9 @@ check_auth_token_expiry_field (S38), and
 check_auth_invalidate_method (S39),
 check_whatsapp_deeplink_intent_format (S40),
 check_p2p_matcher_sessions_endpoint (S41),
-check_android_manifest_whatsapp_queries_v12 (S42), and
-check_main_activity_get_sampled_packets_v13 (S43).
+check_android_manifest_whatsapp_queries_v12 (S42),
+check_main_activity_get_sampled_packets_v13 (S43), and
+check_whatsapp_deeplink_wa_me_format_v14 (S44).
 
 Per Architect brief (Sprint 9.6.6): "self-checks (negative test:
 revert + audit finds 4 FAIL)". Sprint 9.6.7 extends to S6.
@@ -40,6 +41,8 @@ Sprint 10.1D extends to S36-S39.
 Sprint 10.1E extends to S40-S41 (and updates S26 from
 `whatsapp://send?text=` to `intent://send?text=`).
 Sprint 10.1F extends to S42-S43.
+Sprint 10.1G extends to S44 (wa.me primary + intent:// fallback +
+tryOpenWithReason() call site).
 
 S1-S5 cases: 6 (1 PASS + 5 FAIL, ...).
 S6 cases: 4 (1 PASS + 3 FAIL, ...).
@@ -73,8 +76,9 @@ S40 cases: 2 (1 PASS + 1 FAIL — `intent://send?` + `#Intent;scheme=whatsapp;pa
 S41 cases: 2 (1 PASS + 1 FAIL — /api/v1/sessions literal missing OR forbidden /api/v1/matches still present in p2p_matcher).
 S42 cases: 2 (1 PASS + 1 FAIL — `<queries>` + `<package android:name="com.whatsapp"` missing in AndroidManifest).
 S43 cases: 2 (1 PASS + 1 FAIL — `when (call.method)` + `"getSampledPackets"` case missing in MainActivity.kt).
+S44 cases: 1 (1 PASS — `intent://send?text=` AND `https://wa.me/?text=` literals in whatsapp_deeplink_provider.dart + `tryOpenWithReason` call in whatsapp_task_detail_screen.dart).
 
-Total: 71 cases.
+Total: 72 cases.
 """
 import sys
 from pathlib import Path
@@ -1001,6 +1005,54 @@ def run_s43_check(main_activity_text):
     return findings
 
 
+def run_s44_check(whatsapp_provider_text, whatsapp_screen_text):
+    """Sprint 10.1G: WhatsApp wa.me primary + intent:// fallback + tryOpenWithReason call (S44).
+
+    Mirrors check_whatsapp_deeplink_wa_me_format_v14 (the production
+    audit splits the check across two files; the self-test takes
+    both raw texts). All three sub-checks must hold for PASS:
+
+      (a) `whatsapp_deeplink_provider.dart` carries the
+          `intent://send?text=` literal (Sprint 10.1E fallback tier
+          — preserved from the post-10.1F state).
+      (b) `whatsapp_deeplink_provider.dart` carries the new
+          `https://wa.me/?text=` literal (Sprint 10.1G primary tier
+          — OnePlus 9 Pro rooted / Magisk / LSPosed fix).
+      (c) `whatsapp_task_detail_screen.dart` carries the literal
+          `tryOpenWithReason` call (Sprint 10.1G debug-reason API
+          surface — the screen's Gönder button must call the
+          reason-returning variant so the snackbar can show the
+          per-tier failure mode).
+
+    Failure messages list the missing sub-check(s) in a single
+    finding (the production audit emits ONE finding with the
+    comma-joined list — this self-test mirrors that shape so the
+    two test surfaces agree on failure semantics).
+    """
+    findings = []
+    missing = []
+    intent_needle = "intent://send?text="
+    wa_me_needle = "https://wa.me/?text="
+    screen_call_needle = "tryOpenWithReason"
+    if whatsapp_provider_text is None:
+        findings.append("S44 fail (provider file missing)")
+        return findings
+    if intent_needle not in whatsapp_provider_text:
+        missing.append(intent_needle)
+    if wa_me_needle not in whatsapp_provider_text:
+        missing.append(wa_me_needle)
+    if missing:
+        findings.append(
+            "S44 fail (provider missing: " + ",".join(missing) + ")"
+        )
+    if whatsapp_screen_text is None:
+        findings.append("S44 fail (screen file missing)")
+        return findings
+    if screen_call_needle not in whatsapp_screen_text:
+        findings.append("S44 fail (screen missing: " + screen_call_needle + ")")
+    return findings
+
+
 # ─── Test cases ──────────────────────────────────────────────────
 
 # Case 0: fully-valid file (post-Sprint 9.6.6 fix) — expect 0 findings.
@@ -1796,6 +1848,26 @@ class MainActivity : FlutterActivity() {
 
 # ─── Run all cases ───────────────────────────────────────────────
 
+# S44 (Sprint 10.1G) fixture variables — declared here (NOT inside
+# the cases list literal below) because Python list literals cannot
+# contain assignment statements. The strings mirror the real
+# post-10.1G file shape: the provider file's buildUri() + buildWaMeUri()
+# helpers carry BOTH literals, and the screen file's _onSend method
+# calls `WhatsAppDeepLink.tryOpenWithReason()` so the snackbar can
+# surface the per-tier debug reason.
+case_s44_provider_pass = (
+    "static Uri buildUri() => Uri.parse(\n"
+    "  'intent://send?text=foo#Intent;scheme=whatsapp;package=com.whatsapp;end',\n"
+    ");\n"
+    "static Uri buildWaMeUri() => Uri.parse('https://wa.me/?text=foo');\n"
+)
+case_s44_screen_pass = (
+    "final result = await WhatsAppDeepLink.tryOpenWithReason();\n"
+    "if (!result.ok) {\n"
+    "  messenger.showSnackBar(SnackBar(content: Text('WhatsApp açılamadı: ${result.reason}')));\n"
+    "}\n"
+)
+
 cases = [
     # S1-S5 cases (Sprint 9.6.6 — regression guard: must still pass)
     ("PASS (Sprint 9.6.6 fixed file)", run_check, (case_pass,), []),
@@ -1976,7 +2048,14 @@ cases = [
     ("S43 FAIL (MainActivity.kt has a `when (call.method)` block on `opene2ee/vpn_permissions` but the `\"getSampledPackets\"` case is missing on the `opene2ee/vpn` channel — Owner report 10.07.2026 23:29: 30 consecutive 'Aktif Nöbet' calls all failed with MissingPluginException)",
      run_s43_check, (case_s43_main_activity_no_handler,),
      ["S43 fail (\"getSampledPackets\" case missing)"]),
-]   # noqa: E501
+    # S44 cases (Sprint 10.1G - new)
+    # Case 25 (S44 PASS): post-10.1G provider carries BOTH
+    # `intent://send?text=` (fallback) and `https://wa.me/?text=`
+    # (primary) literals; screen file calls `tryOpenWithReason()`.
+    # Mirrors the OnePlus 9 Pro rooted / Magisk / LSPosed fix path.
+    ("S44 PASS (whatsapp_deeplink_provider.dart carries BOTH `intent://send?text=` (10.1E fallback) AND `https://wa.me/?text=` (10.1G primary) literals; whatsapp_task_detail_screen.dart calls `tryOpenWithReason()` — OnePlus 9 Pro rooted / Magisk / LSPosed fix; snackbar surfaces per-tier debug reason)",
+     run_s44_check, (case_s44_provider_pass, case_s44_screen_pass), []),
+ ]   # noqa: E501
 
 failed = []
 for name, check_fn, args, expected in cases:

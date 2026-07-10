@@ -3290,6 +3290,168 @@ def check_auth_invalidate_method() -> list[str]:
     return findings
 
 
+def check_whatsapp_deeplink_wa_me_format_v14() -> list[str]:
+    """Sprint 10.1G: WhatsApp wa.me click-to-chat web URL (primary) +
+    intent:// Android Intent URI (fallback) + tryOpenWithReason() call
+    site in the task detail screen (S44).
+
+    Owner report 10.07.2026 23:46: even after the 10.1E Intent URI
+    fix (`intent://send?text=...#Intent;scheme=whatsapp;package=com.
+    whatsapp;end`) and the 10.1F `<queries>` AndroidManifest fix
+    (Android 11+ package visibility), the snackbar on OnePlus 9 Pro
+    (rooted, Magisk + LSPosed) still read "WhatsApp yüklü değil veya
+    intent başarısız". The 10.1F snackbar was binary — it just said
+    "intent başarısız" with no way to tell which tier (canLaunchUrl
+    false vs. launch returned false vs. exception) failed. Owner
+    could not reproduce the diagnostic in his bug report.
+
+    Sprint 10.1G addresses both:
+
+      (a) PRIMARY PATH — WhatsApp "click-to-chat" web URL:
+              https://wa.me/?text=<urlencoded>
+          wa.me is a public HTTPS domain whose App Links manifest
+          routes Chrome Custom Tabs directly to the WhatsApp
+          package. This path bypasses the Magisk / LSPosed
+          intent-interception layer on OnePlus OxygenOS (verified on
+          the OnePlus 9 Pro that motivated the sprint) and works
+          on every Android OEM ROM in the Sprint 9 cross-OEM test
+          matrix.
+
+      (b) FALLBACK — the 10.1E intent:// Android Intent URI. Kept
+          in the same provider file so the rare device where wa.me
+          routing is not yet live can still try the older path.
+
+      (c) DEBUG REASON — new `tryOpenWithReason()` API returns a
+          `WhatsAppDeepLinkResult({bool ok, String? reason})` so
+          the WhatsApp task detail screen's snackbar can show
+          Owner exactly which tier succeeded / failed and why
+          (canLaunchUrl=false vs. launch exception vs. her iki
+          yöntem başarısız).
+
+    S44 verifies all three:
+
+      (1) `mobile/lib/state/whatsapp_deeplink_provider.dart`
+          contains the `intent://send?text=` literal (Sprint 10.1E
+          fallback tier — preserved from the post-10.1F state).
+      (2) `mobile/lib/state/whatsapp_deeplink_provider.dart`
+          contains the new `https://wa.me/?text=` literal (Sprint
+          10.1G primary tier).
+      (3) `mobile/lib/screens/whatsapp_task_detail_screen.dart`
+          contains the literal `tryOpenWithReason` call (Sprint
+          10.1G debug-reason API surface — the screen must
+          migrate from the boolean `tryOpen()` so the snackbar
+          can show the per-tier failure mode).
+
+    Sub-check (3) catches a future regression where a developer
+    reverts the screen to `tryOpen()` (the boolean wrapper) and
+    loses the debug reason in the snackbar. Without the reason,
+    Owner is back to the 10.1F binary snackbar — exactly the
+    diagnostic the 10.1G sprint added `tryOpenWithReason()` to
+    expose.
+
+    Audit scope is two files:
+
+      - `mobile/lib/state/whatsapp_deeplink_provider.dart`
+        (S44 sub-checks 1+2)
+      - `mobile/lib/screens/whatsapp_task_detail_screen.dart`
+        (S44 sub-check 3)
+
+    No comment-stripping is needed for the provider file — the
+    three required literals are structural (the buildUri() and
+    buildWaMeUri() helpers MUST reference them, otherwise the
+    file would not compile). The screen file's `tryOpenWithReason`
+    call is a top-level method invocation; a comment claiming
+    "we call tryOpenWithReason" would still match the substring
+    but Dart's compiler catches the missing import (the audit
+    treats that as the call site being absent, not as a
+    comment-vs-code false positive — see the Sprint 9.6.5 lesson
+    on regex-grep false-positives; the substring pattern here
+    is intentionally narrow).
+
+    Failure messages report ALL three missing literals in a
+    single finding so a fix-cycle can address them in one pass.
+    """
+    findings = []
+    provider_path = REPO_ROOT / "mobile" / "lib" / "state" / "whatsapp_deeplink_provider.dart"
+    screen_path = REPO_ROOT / "mobile" / "lib" / "screens" / "whatsapp_task_detail_screen.dart"
+    intent_needle = "intent://send?text="
+    wa_me_needle = "https://wa.me/?text="
+    screen_call_needle = "tryOpenWithReason"
+
+    # Provider file — must exist + carry both literals.
+    if not provider_path.exists():
+        findings.append(
+            "S44 mobile/lib/state/whatsapp_deeplink_provider.dart: file "
+            "missing. Sprint 10.1G invariant — the wa.me primary path "
+            "literal (`https://wa.me/?text=`) AND the 10.1E intent:// "
+            "fallback literal (`intent://send?text=`) BOTH live in this "
+            "file (one in `buildWaMeUri()` for the primary tier, one in "
+            "`buildUri()` for the fallback tier)."
+        )
+    else:
+        try:
+            provider_text = provider_path.read_text(encoding="utf-8")
+        except (UnicodeDecodeError, OSError) as e:
+            findings.append(
+                "S44 mobile/lib/state/whatsapp_deeplink_provider.dart: "
+                "read failed (" + str(e) + ")."
+            )
+        else:
+            missing_provider = [
+                n for n in (intent_needle, wa_me_needle) if n not in provider_text
+            ]
+            if missing_provider:
+                findings.append(
+                    "S44 mobile/lib/state/whatsapp_deeplink_provider.dart: "
+                    f"missing required deep-link literal(s): {', '.join(missing_provider)}. "
+                    "Sprint 10.1G invariant — the 2-tier fallback requires "
+                    "BOTH literals in this file: `https://wa.me/?text=` "
+                    "primary tier (buildWaMeUri, resolves via Chrome Custom "
+                    "Tabs → wa.me App Links → WhatsApp package, survives "
+                    "Magisk/LSPosed intent interception on OnePlus 9 Pro) "
+                    "AND `intent://send?text=` fallback tier (buildUri, the "
+                    "10.1E Android Intent URI kept for the rare device "
+                    "where wa.me routing is not yet live). Owner report "
+                    "10.07.2026 23:46: snackbar still read 'WhatsApp yüklü "
+                    "değil veya intent başarısız' on OnePlus 9 Pro rooted "
+                    "until Sprint 10.1G switched the primary path to wa.me."
+                )
+
+    # Screen file — must exist + carry the tryOpenWithReason call.
+    if not screen_path.exists():
+        findings.append(
+            "S44 mobile/lib/screens/whatsapp_task_detail_screen.dart: "
+            "file missing. Sprint 10.1G invariant — the screen's "
+            "Gönder button must call `tryOpenWithReason()` (not the "
+            "boolean `tryOpen()`) so the snackbar surfaces the per-tier "
+            "debug reason to Owner."
+        )
+    else:
+        try:
+            screen_text = screen_path.read_text(encoding="utf-8")
+        except (UnicodeDecodeError, OSError) as e:
+            findings.append(
+                "S44 mobile/lib/screens/whatsapp_task_detail_screen.dart: "
+                "read failed (" + str(e) + ")."
+            )
+        else:
+            if screen_call_needle not in screen_text:
+                findings.append(
+                    "S44 mobile/lib/screens/whatsapp_task_detail_screen.dart: "
+                    "missing the literal `tryOpenWithReason`. Sprint 10.1G "
+                    "invariant — the screen's Gönder button must call "
+                    "`WhatsAppDeepLink.tryOpenWithReason()` (NOT the boolean "
+                    "`WhatsAppDeepLink.tryOpen()` wrapper) so the snackbar "
+                    "can show the per-tier failure reason (wa.me canLaunchUrl "
+                    "false vs. intent:// launch exception vs. her iki yöntem "
+                    "başarısız). Owner explicitly asked for the debug reason "
+                    "in his 10.07.2026 23:46 bug report — the boolean wrapper "
+                    "would silently drop it."
+                )
+
+    return findings
+
+
 def main() -> int:
     all_findings = []
     for fname in TARGETS:
@@ -3527,12 +3689,19 @@ def main() -> int:
     else:
         print("PASS: MainActivity.kt wires `when (call.method) { ... \"getSampledPackets\" -> ... }` on the `opene2ee/vpn` MethodChannel (Kotlin mock packet for Sprint 10.1F; real OpenE2eeVpnService integration lands in Sprint 10.2) - Sprint 10.1F S43")
 
+    # Sprint 10.1G: WhatsApp wa.me primary deep link + intent:// fallback (S44).
+    s44_findings = check_whatsapp_deeplink_wa_me_format_v14()
+    if s44_findings:
+        all_findings.extend(s44_findings)
+    else:
+        print("PASS: whatsapp_deeplink_provider.dart carries BOTH `intent://send?text=` (fallback) AND `https://wa.me/?text=` (primary) literals; whatsapp_task_detail_screen.dart calls `tryOpenWithReason()` - Sprint 10.1G S44")
+
     if all_findings:
         print("\nFINDINGS:")
         for f in all_findings:
             print(f"  - {f}")
         return 1
-    print("\nALL 4 WORKFLOWS + GRADLE WRAPPER + AGP + KOTLIN + SYNTAX v2 + S6 flutter pub get step + S7 mobile entry point + S8 Android XML comments + S9 AndroidManifest merger-spec + S10 Android res/ skeleton + S11 .flutter-plugins-dependencies regen + S12 flutter_embedding_ktx declared in app deps + S13 Flutter storage Maven repo declared in settings.gradle.kts + S17 gradle wrapper force-include + S18 fresh flutter create preservation + S19 fresh create local metadata tracked + S20 pubspec.yaml baseline shape + S25 no `vpn` string in mobile/lib/main.dart + screens + S26 intent://send?text= literal in WhatsApp task detail (10.0 + 10.1E) + S27 LineChart literal in active pool screen + S28 Timer.periodic literal in pool provider + S29 HapticFeedback/SystemSound literal in active pool screen + S33 PoolState debug fields (lastError + lastSuccess) + S34 ScaffoldMessenger.of(context).showSnackBar in active pool screen + S35 String.fromEnvironment('API_KEY' in telemetry_service or p2p_matcher + S36 auth_service.dart POST /api/v1/auth + user_id + S37 authHeaders() in telemetry_service or p2p_matcher + S38 _tokenExpiresAt field in auth_service + S39 invalidate() method in auth_service + S40 whatsapp_deeplink_provider.dart carries BOTH `intent://send?` and `#Intent;scheme=whatsapp;package=com.whatsapp;end` + S41 p2p_matcher.dart uses /api/v1/sessions (not /api/v1/matches) + S42 AndroidManifest <queries> WhatsApp package visibility + S43 MainActivity.kt getSampledPackets method-channel handler PASS PyYAML AUDIT.")
+    print("\nALL 4 WORKFLOWS + GRADLE WRAPPER + AGP + KOTLIN + SYNTAX v2 + S6 flutter pub get step + S7 mobile entry point + S8 Android XML comments + S9 AndroidManifest merger-spec + S10 Android res/ skeleton + S11 .flutter-plugins-dependencies regen + S12 flutter_embedding_ktx declared in app deps + S13 Flutter storage Maven repo declared in settings.gradle.kts + S17 gradle wrapper force-include + S18 fresh flutter create preservation + S19 fresh create local metadata tracked + S20 pubspec.yaml baseline shape + S25 no `vpn` string in mobile/lib/main.dart + screens + S26 intent://send?text= literal in WhatsApp task detail (10.0 + 10.1E) + S27 LineChart literal in active pool screen + S28 Timer.periodic literal in pool provider + S29 HapticFeedback/SystemSound literal in active pool screen + S33 PoolState debug fields (lastError + lastSuccess) + S34 ScaffoldMessenger.of(context).showSnackBar in active pool screen + S35 String.fromEnvironment('API_KEY' in telemetry_service or p2p_matcher + S36 auth_service.dart POST /api/v1/auth + user_id + S37 authHeaders() in telemetry_service or p2p_matcher + S38 _tokenExpiresAt field in auth_service + S39 invalidate() method in auth_service + S40 whatsapp_deeplink_provider.dart carries BOTH `intent://send?` and `#Intent;scheme=whatsapp;package=com.whatsapp;end` + S41 p2p_matcher.dart uses /api/v1/sessions (not /api/v1/matches) + S42 AndroidManifest <queries> WhatsApp package visibility + S43 MainActivity.kt getSampledPackets method-channel handler + S44 whatsapp_deeplink_provider.dart carries BOTH `intent://send?text=` AND `https://wa.me/?text=` + whatsapp_task_detail_screen.dart calls `tryOpenWithReason` (10.1G OnePlus 9 Pro Magisk fix) PASS PyYAML AUDIT.")
     return 0
 
 

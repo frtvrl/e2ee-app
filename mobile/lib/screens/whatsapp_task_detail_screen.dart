@@ -5,13 +5,18 @@ import '../state/whatsapp_deeplink_provider.dart';
 import '../theme/app_theme.dart';
 import '../widgets/chat_bubble.dart';
 
-/// Sprint 10.0 + 10.1E — WhatsApp task detail screen.
+/// Sprint 10.0 + 10.1E + 10.1G — WhatsApp task detail screen.
 ///
 /// Shows a chat-bubble preview of the prepared message, a "Gönder"
 /// button that opens WhatsApp via the
+/// `https://wa.me/?text=<encoded>` click-to-chat web URL (Sprint
+/// 10.1G primary path, S44 audit invariant ensures the
+/// `https://wa.me/?text=` literal is present in
+/// `whatsapp_deeplink_provider.dart` — see that file for the
+/// audit comment chain), with the
 /// `intent://send?text=<encoded>#Intent;scheme=whatsapp;package=com.whatsapp;end`
-/// Android Intent deep link (S26 audit invariant ensures the
-/// `intent://send?text=` literal is present in this docstring; the
+/// Android Intent URI as the fallback tier (S26 audit invariant
+/// keeps the `intent://send?text=` literal in this docstring; the
 /// `#Intent;scheme=whatsapp;package=com.whatsapp;end` fragment is
 /// guarded by S40 in `whatsapp_deeplink_provider.dart`), and a
 /// secondary "İptal" button that pops back to the home screen.
@@ -20,6 +25,16 @@ import '../widgets/chat_bubble.dart';
 /// was unreliable on Android (MIUI / OEM ROMs silently no-op'd the
 /// launch). The Android Intent URI forces PackageManager to route
 /// to the WhatsApp package explicitly.
+///
+/// Sprint 10.1G change: even with the 10.1E Intent URI + 10.1F
+/// `<queries>` manifest declaration, OnePlus 9 Pro (rooted, Magisk
+/// + LSPosed) still showed the snackbar "WhatsApp yüklü değil veya
+/// intent başarısız" — OxygenOS / Magisk was intercepting the
+/// `intent://` URI. The primary path is now the WhatsApp
+/// "click-to-chat" web URL `https://wa.me/?text=<encoded>`; the
+/// intent:// URI is the fallback. The snackbar surfaces the
+/// `tryOpenWithReason()` `reason` string so Owner can copy/paste the
+/// exact tier + canLaunchUrl/launch outcome into his bug report.
 ///
 /// S25 invariant: no "v-p-n" framing in the UI. Just heading,
 /// message preview, and the deep link button. See
@@ -172,12 +187,28 @@ class WhatsAppTaskDetailScreen extends StatelessWidget {
 
   Future<void> _onSend(BuildContext context) async {
     final messenger = ScaffoldMessenger.of(context);
-    final ok = await WhatsAppDeepLink.tryOpen();
-    if (!ok) {
+    final result = await WhatsAppDeepLink.tryOpenWithReason();
+    if (!result.ok) {
+      // Sprint 10.1G: surface the per-tier `reason` so Owner can
+      // copy/paste the exact failure mode (wa.me canLaunchUrl false
+      // vs. intent:// launch exception, etc.) into the bug report.
       messenger.showSnackBar(
-        const SnackBar(
-          content: Text('WhatsApp yüklü değil veya intent başarısız'),
-          duration: Duration(seconds: 3),
+        SnackBar(
+          content: Text(
+            'WhatsApp açılamadı: ${result.reason ?? "bilinmeyen"}',
+          ),
+          duration: const Duration(seconds: 4),
+        ),
+      );
+    } else {
+      // Success path — show the reason anyway so Owner can confirm
+      // which tier handled the launch (wa.me vs. intent:// fallback).
+      // Owner report 10.07.2026 23:46 explicitly asked for the debug
+      // reason on success too.
+      messenger.showSnackBar(
+        SnackBar(
+          content: Text('WhatsApp açıldı: ${result.reason ?? "başarılı"}'),
+          duration: const Duration(seconds: 3),
         ),
       );
     }
