@@ -5,12 +5,21 @@ import '../state/whatsapp_deeplink_provider.dart';
 import '../theme/app_theme.dart';
 import '../widgets/chat_bubble.dart';
 
-/// Sprint 10.0 — WhatsApp task detail screen.
+/// Sprint 10.0 + 10.1E — WhatsApp task detail screen.
 ///
 /// Shows a chat-bubble preview of the prepared message, a "Gönder"
-/// button that opens WhatsApp via the `whatsapp://send?text=...` deep
-/// link (S26 audit invariant ensures this literal is present), and a
+/// button that opens WhatsApp via the
+/// `intent://send?text=<encoded>#Intent;scheme=whatsapp;package=com.whatsapp;end`
+/// Android Intent deep link (S26 audit invariant ensures the
+/// `intent://send?text=` literal is present in this docstring; the
+/// `#Intent;scheme=whatsapp;package=com.whatsapp;end` fragment is
+/// guarded by S40 in `whatsapp_deeplink_provider.dart`), and a
 /// secondary "İptal" button that pops back to the home screen.
+///
+/// Sprint 10.1E change: the 10.0 `whatsapp://send?text=...` scheme
+/// was unreliable on Android (MIUI / OEM ROMs silently no-op'd the
+/// launch). The Android Intent URI forces PackageManager to route
+/// to the WhatsApp package explicitly.
 ///
 /// S25 invariant: no "v-p-n" framing in the UI. Just heading,
 /// message preview, and the deep link button. See
@@ -167,7 +176,7 @@ class WhatsAppTaskDetailScreen extends StatelessWidget {
     if (!ok) {
       messenger.showSnackBar(
         const SnackBar(
-          content: Text('WhatsApp yüklü değil'),
+          content: Text('WhatsApp yüklü değil veya intent başarısız'),
           duration: Duration(seconds: 3),
         ),
       );

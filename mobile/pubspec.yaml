@@ -43,6 +43,12 @@ dependencies:
   fl_chart: ^0.68.0          # Sprint 10.2+ placeholder (Aktif Nobet stats)
   url_launcher: ^6.2.0       # WhatsApp deep link (Sprint 10.0)
 
+  # Sprint 10.1B — real integration. The `http` package is the
+  # only new transport dep; everything else is still the same.
+  # We use it from `telemetry_service.dart` (POST /telemetry) and
+  # `p2p_matcher.dart` (GET /matches). See docs/SPRINT-10.1B-SCOPE.md.
+  http: ^1.2.0               # api-test.opene2ee.com transport (10.1B)
+
 dev_dependencies:
   flutter_test:
     sdk: flutter

@@ -1,9 +1,11 @@
 import 'package:fl_chart/fl_chart.dart';
+import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:go_router/go_router.dart';
 
+import '../config.dart';
 import '../state/pool_provider.dart';
 import '../theme/app_theme.dart';
 import '../widgets/stat_pill.dart';
@@ -53,6 +55,25 @@ class _ActivePoolScreenState extends ConsumerState<ActivePoolScreen>
     final yeniAlici = !eskiAlici;
     if (yeniAlici && !_eslesmeZamanlayiciAktif) {
       _eslesmeZamanlayiciAktif = true;
+      // Sprint 10.1C — info snackbar when the user opts in.
+      // "Eşleşme aranıyor..." signals that the API call
+      // loop has started, even before the first poll
+      // returns. Owner feedback: "hiç tepki yok gibi" — the
+      // instant snackbar on toggle is the visible
+      // confirmation the user wanted.
+      ScaffoldMessenger.of(context)
+        ..hideCurrentSnackBar()
+        ..showSnackBar(
+          SnackBar(
+            content: const Text('Eşleşme aranıyor…'),
+            backgroundColor: AppTheme.accent,
+            duration: const Duration(seconds: 2),
+            behavior: SnackBarBehavior.floating,
+            shape: RoundedRectangleBorder(
+              borderRadius: BorderRadius.circular(12),
+            ),
+          ),
+        );
       // 5 sn sonra "Eşleşme bulundu!" — Sprint 10.1A eşleşme feedback.
       // The callback re-checks the provider because the user may
       // have toggled back off in the meantime.
@@ -86,6 +107,44 @@ class _ActivePoolScreenState extends ConsumerState<ActivePoolScreen>
   @override
   Widget build(BuildContext context) {
     final pool = ref.watch(poolProvider);
+    // Sprint 10.1C — listen for state changes and surface
+    // snackbar feedback. The Owner asked for visible
+    // confirmation that the API is being hit ("hiç tepki
+    // yok gibi"); this ref.listen fires on every lastError
+    // and lastSuccess change so the user sees a snackbar on
+    // every API outcome.
+    ref.listen<PoolState>(poolProvider, (prev, next) {
+      if (next.lastError != null && next.lastError != prev?.lastError) {
+        final messenger = ScaffoldMessenger.of(context);
+        messenger.hideCurrentSnackBar();
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(
+            content: Text('Hata: ${next.lastError}'),
+            backgroundColor: AppTheme.danger,
+            duration: const Duration(seconds: 4),
+            behavior: SnackBarBehavior.floating,
+            shape: RoundedRectangleBorder(
+              borderRadius: BorderRadius.circular(12),
+            ),
+          ),
+        );
+      }
+      if (next.lastSuccess != null && next.lastSuccess != prev?.lastSuccess) {
+        final messenger = ScaffoldMessenger.of(context);
+        messenger.hideCurrentSnackBar();
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(
+            content: Text('OK: ${next.lastSuccess}'),
+            backgroundColor: AppTheme.primary,
+            duration: const Duration(seconds: 2),
+            behavior: SnackBarBehavior.floating,
+            shape: RoundedRectangleBorder(
+              borderRadius: BorderRadius.circular(12),
+            ),
+          ),
+        );
+      }
+    });
     return Scaffold(
       backgroundColor: AppTheme.bg,
       appBar: AppBar(
@@ -162,6 +221,7 @@ class _ActivePoolScreenState extends ConsumerState<ActivePoolScreen>
                       child: _StatCard(
                         label: 'İzlenen Paket',
                         value: pool.paketSayisi.toString(),
+                        isLoading: pool.isLoading,
                       ),
                     ),
                     const SizedBox(width: 12),
@@ -169,6 +229,7 @@ class _ActivePoolScreenState extends ConsumerState<ActivePoolScreen>
                       child: _StatCard(
                         label: 'Bağlı Gönüllü',
                         value: pool.gonulluSayisi.toString(),
+                        isLoading: pool.isLoading,
                       ),
                     ),
                   ],
@@ -185,6 +246,50 @@ class _ActivePoolScreenState extends ConsumerState<ActivePoolScreen>
                 ),
                 const SizedBox(height: 8),
                 _SonGuncellemeCaption(son: pool.sonGuncelleme),
+                // Sprint 10.1C — debug caption. Shows
+                // "Son güncelleme: X sn önce" driven by the
+                // new `lastUpdate` timestamp + a debug-only
+                // "API çağrı sayısı: {n}" counter so the
+                // Owner can verify the polling loop is
+                // running. Hidden in release builds.
+                if (isDebugBuild && pool.apiCallCount > 0) ...[
+                  const SizedBox(height: 4),
+                  Text(
+                    'API çağrı sayısı: ${pool.apiCallCount}',
+                    style: const TextStyle(
+                      fontSize: 10,
+                      color: AppTheme.muted,
+                      fontFamily: 'monospace',
+                    ),
+                  ),
+                ],
+                // Sprint 10.1C — debug status text. Shows the
+                // last error or last success string in muted
+                // text below the stat cards so the user has a
+                // persistent record of the most recent API
+                // outcome (the snackbar auto-dismisses; this
+                // stays on screen).
+                if (pool.lastError != null) ...[
+                  const SizedBox(height: 4),
+                  Text(
+                    'Son hata: ${pool.lastError}',
+                    style: const TextStyle(
+                      fontSize: 10,
+                      color: AppTheme.danger,
+                      fontFamily: 'monospace',
+                    ),
+                  ),
+                ] else if (pool.lastSuccess != null) ...[
+                  const SizedBox(height: 4),
+                  Text(
+                    'Son başarı: ${pool.lastSuccess}',
+                    style: const TextStyle(
+                      fontSize: 10,
+                      color: AppTheme.primary,
+                      fontFamily: 'monospace',
+                    ),
+                  ),
+                ],
               ],
             ),
           ),
@@ -285,10 +390,20 @@ class _PulseAktifPill extends StatelessWidget {
 }
 
 class _StatCard extends StatelessWidget {
-  const _StatCard({required this.label, required this.value});
+  const _StatCard({
+    required this.label,
+    required this.value,
+    this.isLoading = false,
+  });
 
   final String label;
   final String value;
+
+  /// Sprint 10.1C — when true, render a 16x16
+  /// CircularProgressIndicator next to the value so the
+  /// user sees the API call is in flight. The indicator
+  /// is `AppTheme.accent` (orange) to match the hero.
+  final bool isLoading;
 
   @override
   Widget build(BuildContext context) {
@@ -302,14 +417,28 @@ class _StatCard extends StatelessWidget {
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.start,
         children: [
-          Text(
-            label.toUpperCase(),
-            style: const TextStyle(
-              fontSize: 11,
-              color: AppTheme.muted,
-              letterSpacing: 0.8,
-              fontWeight: FontWeight.w500,
-            ),
+          Row(
+            mainAxisAlignment: MainAxisAlignment.spaceBetween,
+            children: [
+              Text(
+                label.toUpperCase(),
+                style: const TextStyle(
+                  fontSize: 11,
+                  color: AppTheme.muted,
+                  letterSpacing: 0.8,
+                  fontWeight: FontWeight.w500,
+                ),
+              ),
+              if (isLoading)
+                const SizedBox(
+                  width: 16,
+                  height: 16,
+                  child: CircularProgressIndicator(
+                    strokeWidth: 2,
+                    valueColor: AlwaysStoppedAnimation<Color>(AppTheme.accent),
+                  ),
+                ),
+            ],
           ),
           const SizedBox(height: 8),
           Text(
