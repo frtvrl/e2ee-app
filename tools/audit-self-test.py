@@ -11,8 +11,11 @@ check_gradle_wrapper_force_include (S17),
 check_fresh_flutter_create_preserved (S18),
 check_fresh_create_metadata_tracked (S19),
 check_pubspec_baseline_shape (S20),
-check_no_vpn_string_in_sprint10_ui (S25), and
-check_whatsapp_deeplink_literal_present (S26).
+check_no_vpn_string_in_sprint10_ui (S25),
+check_whatsapp_deeplink_literal_present (S26),
+check_active_pool_linechart_literal_present (S27),
+check_pool_provider_timer_periodic_literal_present (S28), and
+check_active_pool_haptic_feedback_literal_present (S29).
 
 Per Architect brief (Sprint 9.6.6): "self-checks (negative test:
 revert + audit finds 4 FAIL)". Sprint 9.6.7 extends to S6.
@@ -20,6 +23,7 @@ revert + audit finds 4 FAIL)". Sprint 9.6.7 extends to S6.
 9.6.11 extends to S10. 9.6.12 extends to S11. 9.6.13 extends to S12.
 9.6.14 extends to S13. 9.7.0 Item 5 extends to S17-S20.
 Sprint 10.0 extends to S25-S26.
+Sprint 10.1A extends to S27-S29.
 
 S1-S5 cases: 6 (1 PASS + 5 FAIL, ...).
 S6 cases: 4 (1 PASS + 3 FAIL, ...).
@@ -39,8 +43,11 @@ S19 cases: 2 (1 PASS + 1 FAIL — .metadata not tracked).
 S20 cases: 2 (1 PASS + 1 FAIL — pubspec.yaml missing name).
 S25 cases: 2 (1 PASS + 1 FAIL — `vpn` substring in main.dart).
 S26 cases: 2 (1 PASS + 1 FAIL — `whatsapp://send?text=` missing).
+S27 cases: 2 (1 PASS + 1 FAIL — `LineChart` literal missing in active pool screen).
+S28 cases: 2 (1 PASS + 1 FAIL — `Timer.periodic` literal missing in pool provider).
+S29 cases: 2 (1 PASS + 1 FAIL — `HapticFeedback`/`SystemSound` literal missing in active pool screen).
 
-Total: 43 cases.
+Total: 49 cases.
 """
 import sys
 from pathlib import Path
@@ -662,6 +669,56 @@ def run_s26_check(whatsapp_screen_text):
         return findings
     if "whatsapp://send?text=" not in whatsapp_screen_text:
         findings.append("S26 fail (literal missing)")
+    return findings
+
+
+def run_s27_check(active_pool_text):
+    """Sprint 10.1A: fl_chart LineChart literal in active pool screen (S27).
+
+    Mirrors check_active_pool_linechart_literal_present. The file
+    `mobile/lib/screens/active_pool_screen.dart` must contain the
+    literal `LineChart` (the `fl_chart` widget — already a
+    dependency via `pubspec.yaml` `fl_chart: ^0.68.0`).
+    """
+    findings = []
+    if active_pool_text is None:
+        findings.append("S27 fail (file missing)")
+        return findings
+    if "LineChart" not in active_pool_text:
+        findings.append("S27 fail (literal missing)")
+    return findings
+
+
+def run_s28_check(pool_provider_text):
+    """Sprint 10.1A: Timer.periodic literal in pool provider (S28).
+
+    Mirrors check_pool_provider_timer_periodic_literal_present. The
+    file `mobile/lib/state/pool_provider.dart` must contain the
+    literal `Timer.periodic` (used for the 3-second mock ticker).
+    """
+    findings = []
+    if pool_provider_text is None:
+        findings.append("S28 fail (file missing)")
+        return findings
+    if "Timer.periodic" not in pool_provider_text:
+        findings.append("S28 fail (literal missing)")
+    return findings
+
+
+def run_s29_check(active_pool_text):
+    """Sprint 10.1A: HapticFeedback / SystemSound literal in active pool screen (S29).
+
+    Mirrors check_active_pool_haptic_feedback_literal_present. The
+    file `mobile/lib/screens/active_pool_screen.dart` must contain
+    at least one of the literals `HapticFeedback` or `SystemSound`
+    so the eşleşme notification gives physical feedback.
+    """
+    findings = []
+    if active_pool_text is None:
+        findings.append("S29 fail (file missing)")
+        return findings
+    if ("HapticFeedback" not in active_pool_text) and ("SystemSound" not in active_pool_text):
+        findings.append("S29 fail (no haptic / system-sound literal)")
     return findings
 
 
@@ -1437,6 +1494,21 @@ cases = [
      run_s26_check, ("final uri = 'whatsapp://send?text=hello';\n",), []),
     ("S26 FAIL (whatsapp_task_detail_screen.dart missing the literal `whatsapp://send?text=`)",
      run_s26_check, ("// replaced with custom intent later\n",), ["S26 fail (literal missing)"]),
+    # S27 cases (Sprint 10.1A - new)
+    ("S27 PASS (active_pool_screen.dart contains the literal `LineChart` from package:fl_chart)",
+     run_s27_check, ("child: LineChart(LineChartData(lineBarsData: [LineChartBarData(spots: [])]))\n",), []),
+    ("S27 FAIL (active_pool_screen.dart missing the literal `LineChart` - regression: Sprint 10.1A removed fl_chart)",
+     run_s27_check, ("child: Text('chart coming soon')\n",), ["S27 fail (literal missing)"]),
+    # S28 cases (Sprint 10.1A - new)
+    ("S28 PASS (pool_provider.dart contains the literal `Timer.periodic` for 3s mock ticker)",
+     run_s28_check, ("_timer = Timer.periodic(const Duration(seconds: 3), (_) => _tick());\n",), []),
+    ("S28 FAIL (pool_provider.dart missing the literal `Timer.periodic` - regression: periyodik update replaced with one-shot)",
+     run_s28_check, ("// _timer removed; using Future.delayed loop instead\n",), ["S28 fail (literal missing)"]),
+    # S29 cases (Sprint 10.1A - new)
+    ("S29 PASS (active_pool_screen.dart contains the literal `HapticFeedback` for eşleşme feedback)",
+     run_s29_check, ("HapticFeedback.lightImpact();\n",), []),
+    ("S29 FAIL (active_pool_screen.dart missing both `HapticFeedback` and `SystemSound` - regression: eşleşme is silent)",
+     run_s29_check, ("// haptic removed; visual only\nScaffoldMessenger.showSnackBar(...)\n",), ["S29 fail (no haptic / system-sound literal)"]),
 ]   # noqa: E501
 
 failed = []

@@ -2382,6 +2382,131 @@ def check_whatsapp_deeplink_literal_present() -> list[str]:
     return findings
 
 
+def check_active_pool_linechart_literal_present() -> list[str]:
+    """Sprint 10.1A: fl_chart LineChart used in active pool screen (S27).
+
+    Sprint 10.1A adds a real-time mini-chart to the Aktif Nöbet
+    screen so the user can see packets arriving. The widget must
+    be a `LineChart` from `package:fl_chart` (already a dependency
+    via pubspec.yaml `fl_chart: ^0.68.0`). Replacing this with a
+    custom CustomPainter, a different charting library, or a
+    static image is a Sprint 10.x product decision and should
+    require an explicit scope change.
+
+    Audit scope: `mobile/lib/screens/active_pool_screen.dart` must
+    contain the literal `LineChart` (the `fl_chart` widget).
+    """
+    findings = []
+    target = REPO_ROOT / "mobile" / "lib" / "screens" / "active_pool_screen.dart"
+    needle = "LineChart"
+    if not target.exists():
+        findings.append(
+            "S27 mobile/lib/screens/active_pool_screen.dart: file missing. "
+            "Sprint 10.1A invariant — the active pool screen hosts the "
+            "real-time `LineChart` mini-chart from `package:fl_chart`."
+        )
+        return findings
+    try:
+        text = target.read_text(encoding="utf-8")
+    except (UnicodeDecodeError, OSError) as e:
+        findings.append(
+            "S27 mobile/lib/screens/active_pool_screen.dart: read failed ("
+            + str(e) + ")."
+        )
+        return findings
+    if needle not in text:
+        findings.append(
+            "S27 mobile/lib/screens/active_pool_screen.dart: missing the "
+            "literal `LineChart`. Sprint 10.1A invariant — the real-time "
+            "packet mini-chart must use the `fl_chart` `LineChart` widget."
+        )
+    return findings
+
+
+def check_pool_provider_timer_periodic_literal_present() -> list[str]:
+    """Sprint 10.1A: Timer.periodic in pool provider (S28).
+
+    Sprint 10.1A turns the pool mock state into a "real-time-feel"
+    ticker: `PoolNotifier` runs `Timer.periodic(Duration(seconds: 3), ...)`
+    so paketSayisi / gonulluSayisi advance every three seconds while
+    the user is opted in. Replacing this with a Stream subscription,
+    a manual `Future.delayed` loop, or a one-shot HTTP poll is a
+    Sprint 10.x implementation decision and should require an
+    explicit scope change.
+
+    Audit scope: `mobile/lib/state/pool_provider.dart` must contain
+    the literal `Timer.periodic`.
+    """
+    findings = []
+    target = REPO_ROOT / "mobile" / "lib" / "state" / "pool_provider.dart"
+    needle = "Timer.periodic"
+    if not target.exists():
+        findings.append(
+            "S28 mobile/lib/state/pool_provider.dart: file missing. "
+            "Sprint 10.1A invariant — the pool provider owns the 3-second "
+            "mock ticker via `Timer.periodic(Duration(seconds: 3), ...)`."
+        )
+        return findings
+    try:
+        text = target.read_text(encoding="utf-8")
+    except (UnicodeDecodeError, OSError) as e:
+        findings.append(
+            "S28 mobile/lib/state/pool_provider.dart: read failed ("
+            + str(e) + ")."
+        )
+        return findings
+    if needle not in text:
+        findings.append(
+            "S28 mobile/lib/state/pool_provider.dart: missing the literal "
+            "`Timer.periodic`. Sprint 10.1A invariant — the pool provider "
+            "must drive the periyodik mock update with `Timer.periodic`."
+        )
+    return findings
+
+
+def check_active_pool_haptic_feedback_literal_present() -> list[str]:
+    """Sprint 10.1A: HapticFeedback / SystemSound in active pool screen (S29).
+
+    When the mock pool finds a match 5 seconds after the user opts
+    in, the screen must give physical feedback so the notification
+    is felt, not just seen. This means either
+    `HapticFeedback.lightImpact()` (preferred — `flutter/services`)
+    or `SystemSound.play(SystemSoundType.click)` from the same
+    package. Removing the haptic / system-sound call would degrade
+    the eşleşme experience and is a Sprint 10.x UX decision.
+
+    Audit scope: `mobile/lib/screens/active_pool_screen.dart` must
+    contain at least one of the literals `HapticFeedback` or
+    `SystemSound`.
+    """
+    findings = []
+    target = REPO_ROOT / "mobile" / "lib" / "screens" / "active_pool_screen.dart"
+    if not target.exists():
+        findings.append(
+            "S29 mobile/lib/screens/active_pool_screen.dart: file missing. "
+            "Sprint 10.1A invariant — the eşleşme notification must be "
+            "backed by `HapticFeedback` or `SystemSound` from "
+            "`package:flutter/services.dart`."
+        )
+        return findings
+    try:
+        text = target.read_text(encoding="utf-8")
+    except (UnicodeDecodeError, OSError) as e:
+        findings.append(
+            "S29 mobile/lib/screens/active_pool_screen.dart: read failed ("
+            + str(e) + ")."
+        )
+        return findings
+    if ("HapticFeedback" not in text) and ("SystemSound" not in text):
+        findings.append(
+            "S29 mobile/lib/screens/active_pool_screen.dart: missing both "
+            "`HapticFeedback` and `SystemSound` literals. Sprint 10.1A "
+            "invariant — the eşleşme notification must fire a haptic or "
+            "system-sound feedback so the user feels the match."
+        )
+    return findings
+
+
 def main() -> int:
     all_findings = []
     for fname in TARGETS:
@@ -2519,14 +2644,35 @@ def main() -> int:
     if s26_findings:
         all_findings.extend(s26_findings)
     else:
-        print("PASS: mobile/lib/screens/whatsapp_task_detail_screen.dart contains the literal `whatsapp://send?text=` — Sprint 10.0 S26")
+        print("PASS: mobile/lib/screens/whatsapp_task_detail_screen.dart contains the literal `whatsapp://send?text=` - Sprint 10.0 S26")
+
+    # Sprint 10.1A: fl_chart LineChart literal in active pool screen (S27).
+    s27_findings = check_active_pool_linechart_literal_present()
+    if s27_findings:
+        all_findings.extend(s27_findings)
+    else:
+        print("PASS: mobile/lib/screens/active_pool_screen.dart contains the literal `LineChart` - Sprint 10.1A S27")
+
+    # Sprint 10.1A: Timer.periodic literal in pool provider (S28).
+    s28_findings = check_pool_provider_timer_periodic_literal_present()
+    if s28_findings:
+        all_findings.extend(s28_findings)
+    else:
+        print("PASS: mobile/lib/state/pool_provider.dart contains the literal `Timer.periodic` - Sprint 10.1A S28")
+
+    # Sprint 10.1A: HapticFeedback / SystemSound literal in active pool screen (S29).
+    s29_findings = check_active_pool_haptic_feedback_literal_present()
+    if s29_findings:
+        all_findings.extend(s29_findings)
+    else:
+        print("PASS: mobile/lib/screens/active_pool_screen.dart contains the literal `HapticFeedback` or `SystemSound` - Sprint 10.1A S29")
 
     if all_findings:
         print("\nFINDINGS:")
         for f in all_findings:
             print(f"  - {f}")
         return 1
-    print("\nALL 4 WORKFLOWS + GRADLE WRAPPER + AGP + KOTLIN + SYNTAX v2 + S6 flutter pub get step + S7 mobile entry point + S8 Android XML comments + S9 AndroidManifest merger-spec + S10 Android res/ skeleton + S11 .flutter-plugins-dependencies regen + S12 flutter_embedding_ktx declared in app deps + S13 Flutter storage Maven repo declared in settings.gradle.kts + S17 gradle wrapper force-include + S18 fresh flutter create preservation + S19 fresh create local metadata tracked + S20 pubspec.yaml baseline shape + S25 no `vpn` string in mobile/lib/main.dart + screens + S26 whatsapp://send?text= literal in WhatsApp task detail PASS PyYAML AUDIT.")
+    print("\nALL 4 WORKFLOWS + GRADLE WRAPPER + AGP + KOTLIN + SYNTAX v2 + S6 flutter pub get step + S7 mobile entry point + S8 Android XML comments + S9 AndroidManifest merger-spec + S10 Android res/ skeleton + S11 .flutter-plugins-dependencies regen + S12 flutter_embedding_ktx declared in app deps + S13 Flutter storage Maven repo declared in settings.gradle.kts + S17 gradle wrapper force-include + S18 fresh flutter create preservation + S19 fresh create local metadata tracked + S20 pubspec.yaml baseline shape + S25 no `vpn` string in mobile/lib/main.dart + screens + S26 whatsapp://send?text= literal in WhatsApp task detail + S27 LineChart literal in active pool screen + S28 Timer.periodic literal in pool provider + S29 HapticFeedback/SystemSound literal in active pool screen PASS PyYAML AUDIT.")
     return 0
 
 
