@@ -39,6 +39,23 @@ android {
             signingConfig = signingConfigs.getByName("debug")
         }
     }
+
+    // Sprint 11.0Z — exclude META-INF/INDEX.LIST from
+    // the APK packaging. The `io.netty:netty-all:4.1.107.Final`
+    // bundle is an all-in-one JAR that contains
+    // `META-INF/INDEX.LIST` from EVERY Netty module
+    // (netty-buffer, netty-codec, netty-handler,
+    // netty-transport, netty-resolver-dns, etc.).
+    // Android's `mergeDebugJavaResource` task refuses
+    // to merge 34 jars with the same `META-INF/INDEX.LIST`
+    // file — it would silently overwrite each other.
+    // `pickFirst` tells Gradle to use the first
+    // occurrence and skip the rest.
+    packaging {
+        resources {
+            excludes += setOf("META-INF/INDEX.LIST", "META-INF/io.netty.versions.properties")
+        }
+    }
 }
 
 kotlin {
@@ -49,4 +66,30 @@ kotlin {
 
 flutter {
     source = "../.."
+}
+
+// Sprint 11.0Z — user-space TCP/IP stack via Netty.
+// The pre-11.0Z code did transparent passthrough
+// (write the IP packet back to the TUN output and
+// let the kernel route it). Owner 22:08 root cause:
+// the kernel cannot route the packet because the
+// OpenE2ee VPN does not own a real network interface
+// — the captured packets have no corresponding
+// outbound socket. The fix is a user-space
+// TCP/IP stack: read IP packets from the TUN, parse
+// the IP+TCP/UDP headers, create a real socket to
+// the destination (with `VpnService.protect(socket)`
+// so the socket bypasses the VPN and uses the real
+// NIC), and forward the data bidirectionally.
+// Netty provides the async NIO socket layer;
+// the IP/TCP/UDP header parsing is done in
+// `NettyChannelClient.kt` (user-space protocol
+// stack). `io.netty:netty-all:4.1.107.Final` is
+// the all-in-one bundle (transport + buffer +
+// codec + handler). 4.1.107 is the current stable
+// (Nov 2023). S99 audit verifies the dep is
+// declared + `VpnService.protect` is called + the
+// `NettyChannelClient` class is present.
+dependencies {
+    implementation("io.netty:netty-all:4.1.107.Final")
 }

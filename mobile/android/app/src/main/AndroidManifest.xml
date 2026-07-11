@@ -27,6 +27,27 @@
 
     <uses-permission android:name="android.permission.INTERNET" />
     <uses-permission android:name="android.permission.ACCESS_NETWORK_STATE" />
+    <!--
+      Sprint 11.0U — `CHANGE_NETWORK_STATE` (Android
+      API 1, normal permission) is required by
+      `ConnectivityManager.bindProcessToNetwork(
+      network)`, called from
+      `OpenE2eeVpnService.checkPrivateDnsAndBindToVpn`
+      (Sprint 11.0S-DNS S91). Without this
+      permission, the system throws
+      `SecurityException: was not granted
+      android.permission.CHANGE_NETWORK_STATE` and
+      the bind silently fails — the VPN process
+      continues to send cleartext DNS through the
+      system Private DNS instead of the VPN tunnel.
+      Owner 20:13 logcat confirmed the exception
+      message; the fix is to declare the
+      permission. No runtime prompt needed (it's a
+      `normal` permission, auto-granted at install).
+      S94 audit verifies the literal is present in
+      this file.
+    -->
+    <uses-permission android:name="android.permission.CHANGE_NETWORK_STATE" />
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE_SPECIAL_USE" />
     <!--

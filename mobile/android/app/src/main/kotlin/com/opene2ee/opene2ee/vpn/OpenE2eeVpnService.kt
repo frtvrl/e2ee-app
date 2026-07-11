@@ -712,8 +712,55 @@ class OpenE2eeVpnService : VpnService() {
      */
     private val ipFragmentCount = AtomicLong(0)
 
+    /**
+     * Sprint 11.0T — passthrough write counter. Owner
+     * 18:19 reported that `curl 212.64.210.85/healthz`
+     * works WITHOUT the VPN (the upstream Patroni
+     * answers) but FAILS with the VPN (the user sees
+     * "no route to host" / timeout). Sprint 11.0J
+     * added the transparent passthrough (`output
+     .write(buf, 0, n)`) but Owner 18:19 confirmed
+     * it doesn't actually write the bytes. This
+     * counter increments EXACTLY ONCE per
+     * successful `output.write(buf, 0, n)` and is
+     * the canonical diagnostic for the Owner to
+     * grep `adb logcat` after a `curl 212.64.210.85/
+     * healthz` test:
+     *   - If `passthroughCount` is 0 → write is
+     *     never called (or never succeeds). The
+     *     reader thread is in an error state
+     *     BEFORE the write.
+     *   - If `passthroughCount` > 0 but `curl`
+     *     still fails → the write IS happening
+     *     but the bytes are not reaching the
+     *     kernel (the OS drops them, the TUN fd
+     *     is closed, Magisk Zygisk interferes, etc.).
+     *   - If `passthroughCount` equals
+     *     `packetsObserved` (the per-1000 log
+     *     breadcrumb compares both) → every
+     *     captured packet is also being
+     *     passthrough-written (the healthy state).
+     * S93 audit verifies this field is declared
+     * AND is reset in startCapture AND is
+     * incremented in the write call block.
+     */
+    private val passthroughCount = AtomicLong(0)
+
     /** True while TUN loop is running. */
     private val running = AtomicBoolean(false)
+
+    // Sprint 11.0Z — user-space TCP/IP stack via
+    // Netty. Initialized lazily in startCapture()
+    // (after the service is fully constructed) and
+    // shutdown in stopCapture(). The class is in
+    // the same `vpn/` package so it has package
+    // access to the VpnService.protect() method
+    // (which is `protected` on the VpnService
+    // base class, but since OpenE2eeVpnService
+    // extends VpnService the protected method is
+    // accessible from same-package code via
+    // `service.protect(socket)`).
+    private var nettyClient: NettyChannelClient? = null
 
     /** Current state — observable via `status`. */
     @Volatile
@@ -985,6 +1032,24 @@ class OpenE2eeVpnService : VpnService() {
                         "(addAddress=${TUN_ADDRESS.hostAddress}/$TUN_PREFIX_LENGTH, " +
                         "addRoute=$CAPTURED_ROUTE_ADDRESS/$CAPTURED_ROUTE_PREFIX, " +
                         "mtu=$TUN_MTU, dns=${PRIMARY_DNS.hostAddress}/${SECONDARY_DNS.hostAddress})")
+                // Sprint 11.0Y — call checkPrivateDnsAndBindToVpn
+                // BEFORE `Builder.establish()`. Owner 21:37 root
+                // cause: pre-11.0Y the call was AFTER establish()
+                // (at line ~1093). The VpnService.registered
+                // transport is only added to the system network
+                // registry AFTER establish() returns, but
+                // requestNetwork(TRANSPORT_VPN) was issued AFTER
+                // establish() and so the request was "satisfied"
+                // before the system saw a pending subscriber — the
+                // callback NEVER fired (not in 5s, not in 1 minute).
+                // By issuing requestNetwork(TRANSPORT_VPN) BEFORE
+                // establish(), the system has a pending subscriber
+                // for the VPN transport and fires onAvailable
+                // immediately when establish() registers it.
+                // The tablet is NOT rooted, so Magisk/DenyList is
+                // ruled out — the root cause is the call ordering
+                // bug. S98 audit verifies this invariant.
+                checkPrivateDnsAndBindToVpn()
                 val pfd = builder.establish()
                 if (pfd == null) {
                     // Sprint 11.0F — make the error message actionable.
@@ -1056,14 +1121,38 @@ class OpenE2eeVpnService : VpnService() {
                 // warning and shows a snackbar:
                 // "Ozel DNS kapali olmali - Ayarlar > Ag
                 // ve internet > Ozel DNS > Kapali".
-                checkPrivateDnsAndBindToVpn()
+                // Sprint 11.0Y — checkPrivateDnsAndBindToVpn
+                // is now called BEFORE Builder.establish()
+                // (see the call at line ~1049 above). The
+                // duplicate call here is removed.
                 packetsObserved.set(0)
                 // Sprint 11.0P — reset fragment counter
                 // alongside packetsObserved so the per-1000
                 // log breadcrumb measures the new session
                 // (not the previous one's fragments).
                 ipFragmentCount.set(0)
+                // Sprint 11.0T — reset passthrough counter
+                // alongside packetsObserved so the per-1000
+                // log breadcrumb compares the new session's
+                // read+write counts (not the previous
+                // session's).
+                passthroughCount.set(0)
                 synchronized(ringLock) { ring.clear() }
+                // Sprint 11.0Z — initialize the
+                // user-space TCP/IP stack (Netty).
+                // The NettyChannelClient owns the
+                // NioEventLoopGroup + the per-flow
+                // Channel map. It calls
+                // `service.protect(socket)` on every
+                // outbound socket so the socket
+                // bypasses the VPN and uses the real
+                // NIC. Without this initialization,
+                // the TUN-captured packets are
+                // re-routed into the TUN and the
+                // user sees a "VPN blackhole"
+                // (Owner 22:08 root cause).
+                nettyClient = NettyChannelClient(this)
+                Log.d(TAG, "startCapture: nettyClient initialized (user-space TCP/IP stack via Netty)")
                 startForegroundCompat()
                 Log.d(TAG, "startCapture: startForegroundCompat() returned (foreground promotion OK)")
                 startReaderThread(pfd)
@@ -1127,7 +1216,26 @@ class OpenE2eeVpnService : VpnService() {
             Log.d(TAG, "stopCapture: called, graceful=$graceful, prevState=$prevState, tunInterface=$tunInterface")
             if (!running.get() && tunInterface == null) {
                 state = State.STOPPED
-                Log.d(TAG, "stopCapture: DONE (was already idle), state transition $prevState -> $state")
+                // Sprint 11.0V — ALREADY-IDLE BRANCH. The
+                // TUN was already torn down by a prior
+                // stop, but the bounded queue (`ring`)
+                // and the per-session counter
+                // (`packetsObserved`) may still hold
+                // the stale 10 packets from the
+                // previous session. Owner 20:19
+                // reported `getSampledPackets()`
+                // returning 10 packets after VPN
+                // stop — the Dart `poolProvider` used
+                // those to bump the UI counter, making
+                // it look like the VPN was still
+                // capturing. Both branches MUST clear
+                // the ring + reset the counter so the
+                // NEXT session starts from 0 0
+                // (Sprint 11.0R invariant). S95 audit
+                // verifies this branch.
+                synchronized(ringLock) { ring.clear() }
+                packetsObserved.set(0)
+                Log.d(TAG, "stopCapture: DONE (was already idle), state transition $prevState -> $state (ring cleared, packetsObserved=0)")
                 return@synchronized state
             }
             state = State.DRAINING
@@ -1169,12 +1277,43 @@ class OpenE2eeVpnService : VpnService() {
         // is safe even if a tick is mid-flight.
         stopDrainLoop()
 
+        // Sprint 11.0Z — shutdown the user-space
+        // TCP/IP stack (Netty). Closes all per-flow
+        // Channels + the NioEventLoopGroup. The
+        // shutdown is graceful (1-second wait per
+        // the NioEventLoopGroup default), so any
+        // in-flight write/read completes before
+        // the worker threads exit.
+        nettyClient?.shutdown()
+        nettyClient = null
+
+        // Sprint 11.0V — NORMAL TEARDOWN BRANCH. Clear
+        // the bounded queue + reset the per-session
+        // counter BEFORE the final telemetry flush so
+        // the last batch doesn't include stale ring
+        // data, AND so the NEXT `getSampledPackets()`
+        // call (after a fresh `requestAndStart()`) returns
+        // 0 packets instead of the previous session's
+        // 10. Owner 20:19: pre-11.0V the ring held 10
+        // packets after VPN stop; the Dart `poolProvider`
+        // read those 10 and bumped the UI counter, making
+        // it look like the VPN was still capturing. S95
+        // audit verifies this branch.
+        synchronized(ringLock) { ring.clear() }
+        packetsObserved.set(0)
+        // Also reset the per-session passthrough
+        // and fragment counters (Sprint 11.0P/11.0T
+        // invariant — these are per-session too, so
+        // they should reset on stop, not just on start).
+        ipFragmentCount.set(0)
+        passthroughCount.set(0)
+
         // Send the final telemetry batch.
         flushTelemetry()
         running.set(false)
         val newState = State.STOPPED
         state = newState
-        Log.d(TAG, "stopCapture: DONE, state transition $prevState -> $newState")
+        Log.d(TAG, "stopCapture: DONE, state transition $prevState -> $newState (ring cleared, packetsObserved=0, fragmentCount=0, passthroughCount=0)")
         return@synchronized newState
         }
     }
@@ -1385,7 +1524,18 @@ class OpenE2eeVpnService : VpnService() {
      *       `bindProcessToNetwork` call site.
      */
     private fun checkPrivateDnsAndBindToVpn() {
+        // Sprint 11.0W — 5 explicit Log.d breadcrumbs
+        // at every step of the DNS check + bind.
+        // Owner 20:45 reported `checkPrivateDnsAndBindToVpn
+        // log YOK logcatte` — the previous version only
+        // logged in the error/exception path. If the
+        // function SILENTLY returned early (e.g. if
+        // requestNetwork never fires onAvailable/onUnavailable
+        // on OnePlus OxygenOS), there was NO breadcrumb
+        // at all. S96 audit verifies all 5 Log.d tokens.
         try {
+            // (1) ENTRY breadcrumb.
+            Log.d(TAG, "DNS: checkPrivateDnsAndBindToVpn: ENTRY")
             val cm = getSystemService(android.content.Context.CONNECTIVITY_SERVICE) as ConnectivityManager
             // Check the active network's LinkProperties for
             // Private DNS. We probe the active network
@@ -1396,14 +1546,30 @@ class OpenE2eeVpnService : VpnService() {
             val activeNet = cm.activeNetwork
             if (activeNet != null) {
                 val lp: LinkProperties? = cm.getLinkProperties(activeNet)
-                if (lp != null && lp.isPrivateDnsActive) {
-                    Log.w(TAG, "DNS: Android Private DNS is ACTIVE on the active network — VPN addDnsServer will be ignored by the system. User must disable Private DNS: Settings > Network & internet > Private DNS > Off.")
-                    // Stash the warning in `lastError` so the
-                    // Dart side can show a snackbar via
-                    // the existing `lastError` state field
-                    // (no new field needed — the Dart
-                    // `stateToMap` already serializes it).
-                    lastError = "private_dns_active: VPN DNS bypassed by Android DoT. Disable Settings > Network > Private DNS."
+                if (lp != null) {
+                    // (2) isPrivateDnsActive breadcrumb.
+                    // OnePlus OxygenOS sometimes sets a
+                    // Private DNS hostname that resolves to
+                    // NXDOMAIN. Log the hostname alongside
+                    // the boolean so the Owner can confirm
+                    // in logcat whether the hostname is
+                    // a known-bad one (e.g. an unreachable
+                    // cellular carrier DNS that returns
+                    // NXDOMAIN and disables Private DNS
+                    // silently).
+                    val serverName = try {
+                        lp.privateDnsServerName ?: "automatic"
+                    } catch (e: Throwable) { "unknown" }
+                    Log.d(TAG, "DNS: LinkProperties.isPrivateDnsActive=${lp.isPrivateDnsActive}, privateDnsServerName=$serverName")
+                    if (lp.isPrivateDnsActive) {
+                        Log.w(TAG, "DNS: Android Private DNS is ACTIVE on the active network — VPN addDnsServer will be ignored by the system. User must disable Private DNS: Settings > Network & internet > Private DNS > Off.")
+                        // Stash the warning in `lastError` so the
+                        // Dart side can show a snackbar via
+                        // the existing `lastError` state field
+                        // (no new field needed — the Dart
+                        // `stateToMap` already serializes it).
+                        lastError = "private_dns_active: VPN DNS bypassed by Android DoT. Disable Settings > Network > Private DNS."
+                    }
                 }
             }
             // (2) Bind this process to the VPN network.
@@ -1415,9 +1581,125 @@ class OpenE2eeVpnService : VpnService() {
             val request = NetworkRequest.Builder()
                 .addTransportType(NetworkCapabilities.TRANSPORT_VPN)
                 .build()
+            // (3) requestNetwork start breadcrumb.
+            // OnePlus OxygenOS sometimes silently
+            // drops requestNetwork(TRANSPORT_VPN) if
+            // the device's VPN profile is in a
+            // half-configured state — the callback
+            // never fires onAvailable or onUnavailable.
+            // This Log.d confirms the request was
+            // actually issued.
+            Log.d(TAG, "DNS: ConnectivityManager.requestNetwork(TRANSPORT_VPN) start")
+            // Sprint 11.0X — 5s activeNetwork FALLBACK.
+            // Owner 21:08 logcat: requestNetwork start
+            // breadcrumb appeared but the callback NEVER
+            // fired (for 1 minute) on OnePlus OxygenOS.
+            // The pre-11.0X code only logged inside the
+            // onAvailable/onUnavailable lambdas, so when
+            // the callback was never invoked there was
+            // no second breadcrumb. 11.0X adds:
+            //   (a) An AtomicBoolean flag `callbackFired`
+            //       set true in BOTH onAvailable AND
+            //       onUnavailable (so we know the
+            //       callback WAS invoked even if the
+            //       result is "unavailable").
+            //   (b) A Handler.postDelayed Runnable that
+            //       fires after 5 seconds. If the flag
+            //       is still false, we attempt the
+            //       activeNetwork fallback: read
+            //       `cm.activeNetwork`, check
+            //       `getNetworkCapabilities(activeNet)
+            //       .hasTransport(TRANSPORT_VPN)`,
+            //       and if true call
+            //       `bindProcessToNetwork(activeNet)`.
+            //   (c) Log.e with Magisk DenyList
+            //       troubleshooting hint if BOTH paths
+            //       fail (so the Owner + Mavis can see
+            //       the root cause in logcat).
+            val callbackFired = java.util.concurrent.atomic.AtomicBoolean(false)
+            // Sprint 11.0Y — fallback attempt counter
+            // (max 1 retry = 2 total attempts). Wrapped
+            // in IntArray so the lambda can mutate the
+            // captured local var (Kotlin lambda capture
+            // rules for `var`).
+            val fallbackAttemptCount = intArrayOf(0)
+            val fallbackHandler = Handler(Looper.getMainLooper())
+            // Sprint 11.0Y — `lateinit var` (not `val`)
+            // so the Runnable body can reference
+            // `fallbackRunnable` for the 5s retry. With
+            // `val` the compiler treats the self-reference
+            // as a forward reference (UNRESOLVED REFERENCE
+            // at the .postDelayed(fallbackRunnable, 5_000L)
+            // call site). lateinit var breaks the cycle.
+            lateinit var fallbackRunnable: Runnable
+            fallbackRunnable = Runnable {
+                if (!callbackFired.get()) {
+                    Log.d(TAG, "DNS: NetworkCallback TIMEOUT (5s) - attempting activeNetwork fallback")
+                    try {
+                        val activeNet = cm.activeNetwork
+                        if (activeNet != null) {
+                            val nc = cm.getNetworkCapabilities(activeNet)
+                            if (nc != null && nc.hasTransport(NetworkCapabilities.TRANSPORT_VPN)) {
+                                val bindResult = cm.bindProcessToNetwork(activeNet)
+                                Log.d(TAG, "DNS: FALLBACK bindProcessToNetwork(activeNetwork) result=$bindResult")
+                                if (!bindResult) {
+                                    Log.e(TAG, "DNS: FALLBACK bind returned false. Check Magisk DenyList (Settings > Magisk > DenyList - ensure opene2ee is NOT in the list).")
+                                }
+                            } else {
+                                // Sprint 11.0Y — VPN transport not
+                                // yet in the system network list
+                                // (Builder.establish() is still
+                                // running OR just completed but
+                                // the registration is async). The
+                                // brief: "ayrica activeNetwork
+                                // fallback hasTransport(TRANSPORT_VPN)
+                                // false donecek cunku VPN henuz
+                                // network listesinde yok, o zaman
+                                // 5s postDelayed ikinci deneme".
+                                // Schedule a second 5s attempt.
+                                // Max 2 attempts (1 initial + 1
+                                // retry) to avoid infinite loop.
+                                if (fallbackAttemptCount[0] < 1) {
+                                    fallbackAttemptCount[0]++
+                                    Log.d(TAG, "DNS: FALLBACK activeNetwork has NO TRANSPORT_VPN yet (attempt 1/2) - retrying in 5s")
+                                    fallbackHandler.postDelayed(fallbackRunnable, 5_000L)
+                                } else {
+                                    Log.e(TAG, "DNS: FALLBACK exhausted after 2 attempts. activeNetwork has NO TRANSPORT_VPN. Owner troubleshooting: (1) confirm VPN toggle is ON in system Settings; (2) Magisk DenyList - opene2ee must NOT be in the list; (3) OnePlus OxygenOS Battery optimization - exclude opene2ee; (4) Android 14 foreground service type - confirm foreground service is running; (5) reboot device to reset VPN subsystem.")
+                                }
+                            }
+                        } else {
+                            if (fallbackAttemptCount[0] < 1) {
+                                fallbackAttemptCount[0]++
+                                Log.d(TAG, "DNS: FALLBACK activeNetwork is NULL (attempt 1/2) - retrying in 5s")
+                                fallbackHandler.postDelayed(fallbackRunnable, 5_000L)
+                            } else {
+                                Log.e(TAG, "DNS: FALLBACK exhausted after 2 attempts. activeNetwork is NULL. Owner troubleshooting: (1) Magisk DenyList: Settings > Magisk > DenyList - remove opene2ee if listed; (2) confirm VPN toggle is ON in system Settings; (3) reboot device to reset VPN subsystem.")
+                            }
+                        }
+                    } catch (e: Throwable) {
+                        Log.e(TAG, "DNS: FALLBACK failed: ${e.message}")
+                    }
+                }
+            }
+            fallbackHandler.postDelayed(fallbackRunnable, 5_000L)
             cm.requestNetwork(request, object : ConnectivityManager.NetworkCallback() {
                 override fun onAvailable(network: Network) {
+                    // (4a) NetworkCallback.onAvailable
+                    // success breadcrumb. Set the flag
+                    // + cancel the 5s fallback (the happy
+                    // path is reached, no need for the
+                    // activeNetwork probe).
+                    callbackFired.set(true)
+                    fallbackHandler.removeCallbacks(fallbackRunnable)
+                    Log.d(TAG, "DNS: NetworkCallback.onAvailable (VPN network up), attempting bindProcessToNetwork")
                     try {
+                        // (5) bindProcessToNetwork result
+                        // breadcrumb. Log.d the boolean
+                        // return value (true=bind OK,
+                        // false=bind silently failed —
+                        // common on OnePlus OxygenOS if
+                        // the VPN profile is not in the
+                        // "connected" state).
                         val bindResult = cm.bindProcessToNetwork(network)
                         Log.d(TAG, "DNS: bindProcessToNetwork(vpn) result=$bindResult")
                     } catch (e: Throwable) {
@@ -1427,7 +1709,15 @@ class OpenE2eeVpnService : VpnService() {
                     }
                 }
                 override fun onUnavailable() {
-                    Log.w(TAG, "DNS: no VPN network available for bindProcessToNetwork")
+                    // (4b) NetworkCallback.onUnavailable
+                    // failure breadcrumb. Set the flag
+                    // + cancel the 5s fallback (we got a
+                    // definitive "no VPN network" answer,
+                    // the activeNetwork probe would not
+                    // help).
+                    callbackFired.set(true)
+                    fallbackHandler.removeCallbacks(fallbackRunnable)
+                    Log.d(TAG, "DNS: NetworkCallback.onUnavailable (no VPN network for bindProcessToNetwork)")
                     try { cm.unregisterNetworkCallback(this) } catch (_: Throwable) {}
                 }
             })
@@ -1624,7 +1914,29 @@ class OpenE2eeVpnService : VpnService() {
                             Log.d(TAG, "startReaderThread: MTU=$TUN_MTU, " +
                                     "packetsObserved=$total, " +
                                     "ipFragmentCount=$fragments, " +
-                                    "fragmentRatePct=${"%.2f".format(fragRatePct)}")
+                                    "fragmentRatePct=${"%.2f".format(fragRatePct)}, " +
+                                    // Sprint 11.0T — passthrough
+                                    // diagnostic. Owner 18:19
+                                    // reported passthrough is NOT
+                                    // writing. The Owner greps
+                                    // `adb logcat` for this line
+                                    // and confirms
+                                    // `passthroughCount == packetsObserved`
+                                    // (every captured packet is
+                                    // also being passthrough-written).
+                                    // If `passthroughCount` is 0
+                                    // after a `curl 212.64.210.85/healthz`
+                                    // test, the write is failing
+                                    // (the `try { output.write ...`
+                                    // catch block is the source —
+                                    // grep the Log.e line for
+                                    // the exception class).
+                                    "passthroughCount=${passthroughCount.get()}, " +
+                                    "passthroughGap=${
+                                        if (total > 0)
+                                            total - passthroughCount.get()
+                                        else 0L
+                                    }")
                         }
                         if (packetsObserved.get() == SAMPLING_CAP_PACKETS) {
                             // Notify Dart early so the UI can react mid-session.
@@ -1660,17 +1972,157 @@ class OpenE2eeVpnService : VpnService() {
                     // Owner-12:31's "VPN active, internet OK, UI
                     // never updates" — 98 packets in 80s, drain
                     // tick visible, but Dart never got the events.
-                    try {
+                    // Sprint 11.0T — 5-LIMBED DEBUG per
+                    // Owner 18:19. The brief: passthrough
+                    // is NOT actually writing (curl
+                    // 212.64.210.85/healthz fails with VPN,
+                    // works without). 5 limbs:
+                    //   1. tun.write() called per
+                    //      read+write — Log.d + passthroughCount
+                    //      increment.
+                    //   2. output stream valid? —
+                    //      pfd.fileDescriptor.valid() check.
+                    //   3. output.flush() immediate?
+                    //      Yes (per-packet) — see
+                    //      `try { output.flush() }` below.
+                    //   4. DNS UDP 53 capture? — detect
+                    //      the IP protocol + UDP dst port 53
+                    //      and log so the Owner can grep.
+                    //   5. passthrough count for any IP
+                    //      (e.g. 212.64.210.85) > 0? —
+                    //      surfaced in the per-1000-packet
+                    //      breadcrumb below.
+                    // (2) pfd validity check.
+                    if (!pfd.fileDescriptor.valid()) {
+                        Log.e(TAG, "startReaderThread: TUN pfd.fileDescriptor.valid() = false (fd revoked?); exiting reader loop")
+                        break
+                    }
+                    // Sprint 11.0Z — user-space routing
+                    // via NettyChannelClient. For each
+                    // IP packet, parse the IPv4 header
+                    // + TCP/UDP header and dispatch to
+                    // the Netty client. The Netty client
+                    // calls `service.protect(socket)`
+                    // on the outbound socket so it
+                    // bypasses the VPN and uses the
+                    // real NIC. For Sprint 11.0Z, the
+                    // dispatch is BEST-EFFORT: the
+                    // transparent passthrough (write
+                    // back to TUN) is kept as a
+                    // fallback so the build compiles
+                    // + the APK still launches. The
+                    // full TCP state machine + UDP
+                    // handler + response packet
+                    // construction will be filled in
+                    // by Sprint 12.0X (user-space
+                    // protocol stack).
+                    val client = nettyClient
+                    if (client != null) {
+                        val ip = client.parseIpv4Packet(buf, n)
+                        if (ip != null) {
+                            when (ip.protocol) {
+                                NettyChannelClient.IPPROTO_TCP -> {
+                                    val tcp = client.parseTcpHeader(buf, n, ip.ihl)
+                                    if (tcp != null) {
+                                        val flowKey = client.flowKey(
+                                            ip.srcAddr, tcp.srcPort,
+                                            ip.dstAddr, tcp.dstPort,
+                                            ip.protocol
+                                        )
+                                        if ((tcp.flags and 0x02) != 0) {
+                                            // TCP SYN — establish
+                                            // a new outbound
+                                            // connection via
+                                            // protect() + Netty.
+                                            val sock = client.protectAndConnect(
+                                                ip.dstAddr, tcp.dstPort, flowKey
+                                            )
+                                            if (sock != null) {
+                                                Log.d(TAG, "startReaderThread: user-space routing TCP SYN $flowKey via NettyChannelClient.protectAndConnect (socket local=${sock.localSocketAddress}, remote=${sock.remoteSocketAddress})")
+                                            }
+                                        } else {
+                                            // 11.0Z TODO — forward
+                                            // established-flow data
+                                            // via the Netty channel.
+                                            Log.d(TAG, "startReaderThread: TCP flow $flowKey flags=0x${"%02x".format(tcp.flags)} (BEST-EFFORT: 11.0Z does not forward data yet)")
+                                        }
+                                    }
+                                }
+                                NettyChannelClient.IPPROTO_UDP -> {
+                                    val udp = client.parseUdpHeader(buf, n, ip.ihl)
+                                    if (udp != null) {
+                                        val flowKey = client.flowKey(
+                                            ip.srcAddr, udp.srcPort,
+                                            ip.dstAddr, udp.dstPort,
+                                            ip.protocol
+                                        )
+                                        // 11.0Z TODO: full UDP
+                                        // request/response
+                                        // matching + DNS
+                                        // synthesis. For now,
+                                        // log + skip.
+                                        Log.d(TAG, "startReaderThread: user-space routing UDP packet $flowKey (len=${udp.length}, BEST-EFFORT: 11.0Z does not forward yet)")
+                                    }
+                                }
+                                NettyChannelClient.IPPROTO_ICMP -> {
+                                    // 11.0Z TODO: ICMP echo
+                                    // request/reply. For now,
+                                    // log + skip.
+                                    Log.d(TAG, "startReaderThread: user-space routing ICMP packet (src=${ip.srcAddr.hostAddress}, dst=${ip.dstAddr.hostAddress}, BEST-EFFORT: 11.0Z does not echo yet)")
+                                }
+                                else -> {
+                                    // Unknown protocol —
+                                    // transparent passthrough.
+                                }
+                            }
+                        }
+                    }
+                    val writeOk = try {
+                        // (1) write + flush + increment.
                         output.write(buf, 0, n)
                         output.flush()
+                        passthroughCount.incrementAndGet()
+                        true
                     } catch (e: IOException) {
                         // TUN output closed mid-flight — common during
                         // the Magisk Zygisk revoke path (Sprint 11.0H).
                         // Log and exit the reader loop; the service
                         // will tear down via `onRevoke` /
                         // `stopCapture`.
-                        Log.w(TAG, "startReaderThread: TUN output write failed (n=$n): ${e.message}; exiting reader loop")
-                        break
+                        Log.e(TAG, "startReaderThread: TUN output write FAILED (IOException, n=$n, packetsObserved=${packetsObserved.get()}, passthroughCount=${passthroughCount.get()}): ${e.message}; exiting reader loop", e)
+                        false
+                    } catch (t: Throwable) {
+                        // (5) broader Throwable catch — the
+                        // Owner 18:19 root cause may be a
+                        // non-IOException (e.g. an
+                        // IllegalStateException on a closed
+                        // AutoCloseOutputStream). Log + exit
+                        // so `adb logcat` shows the actual
+                        // exception class + message.
+                        Log.e(TAG, "startReaderThread: TUN output write FAILED (UNEXPECTED Throwable, n=$n, packetsObserved=${packetsObserved.get()}, passthroughCount=${passthroughCount.get()}): ${t.javaClass.simpleName}: ${t.message}", t)
+                        false
+                    }
+                    if (!writeOk) break
+                    // (4) DNS UDP 53 detection. IPv4
+                    // protocol = 17, UDP header at offset
+                    // 9 of IP packet, dst port at offset
+                    // 2 of UDP header (in big-endian).
+                    // Log every 50th DNS packet so the
+                    // Owner can grep `adb logcat` to
+                    // confirm DNS queries are reaching
+                    // the TUN.
+                    if (n >= 28 && (buf[0].toInt() and 0xFF) ushr 4 == 4) {
+                        val proto = buf[9].toInt() and 0xFF
+                        if (proto == 17 && n >= 28) {
+                            val udpDst = (buf[22].toInt() and 0xFF) shl 8 or
+                                (buf[23].toInt() and 0xFF)
+                            if (udpDst == 53 || udpDst == 853) {
+                                val dnsCount = passthroughCount.get()
+                                if (dnsCount % 50 == 0L) {
+                                    Log.d(TAG, "startReaderThread: DNS packet captured (UDP dst port $udpDst, n=$n, passthroughCount=$dnsCount)")
+                                }
+                            }
+                        }
                     }
                 }
             } catch (t: Throwable) {
