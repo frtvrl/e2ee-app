@@ -1,0 +1,81 @@
+Sprint 11.0S-EXTRA - native notification chronometer + 00:00 auto-stop (S92 audit)
+
+Owner 17:21: the 15-minute countdown must also be
+visible in the Android notification bar (not just
+in the in-app display). The implementation uses the
+NATIVE Android `setUsesChronometer(true)` +
+`setWhen(endTimeMs)` pattern on the foreground
+notification builder — the system renders the
+countdown internally (no per-second Kotlin Timer = no
+battery drain). When the chronometer hits 00:00, a
+Handler.postDelayed Runnable fires once and calls
+`stopCapture(graceful = true)` to tear down the VPN.
+
+11.0S-EXTRA fix:
+  1. New companion constant
+     `COUNTDOWN_TOTAL_MS = 15L * 60L * 1000L` (15
+     minutes, the agreed session cap).
+  2. Updated `buildForegroundNotification()` to add
+     `.setUsesChronometer(true) +
+      .setWhen(System.currentTimeMillis() +
+       COUNTDOWN_TOTAL_MS) +
+      .setShowWhen(true)` to the NotificationCompat
+     builder. The system renders the countdown at
+     the right edge of the notification, ticking
+     down from "15:00" to "00:00" without any
+     Kotlin polling.
+  3. New `scheduleCountdownAutoStop()` method called
+     from `startCapture()` after the foreground
+     notification is posted. It builds a Runnable
+     that calls `stopCapture(graceful = true)` and
+     posts it on `mainHandler` (the Android main
+     looper, set up in 11.0K) with a delay of
+     `COUNTDOWN_TOTAL_MS`. The Runnable fires
+     exactly once at 00:00 and tears down the VPN
+     gracefully (close TUN, drain ring, notify Dart).
+  4. New field `countdownAutoStopRunnable: Runnable?`
+     tracked so manual disconnect (toggle OFF, 11.0R
+     "Oturumu Bitir" button, 11.0Q
+     `MainActivity.disconnectVpn`) can cancel the
+     pending 00:00 wakeup via
+     `mainHandler.removeCallbacks(runnable)`. Without
+     this, a user who manually disconnects at 14:30
+     would have a stale 30-second-later wakeup on a
+     stopped service (potential re-entrant
+     teardown).
+  5. Updated the notification `setContentText` to
+     include "15 dk sonra otomatik kapanır" so the
+     user knows the auto-stop is intentional.
+
+S92 audit verifies SEVEN tokens in
+`OpenE2eeVpnService.kt` (comment-stripped):
+  1. `COUNTDOWN_TOTAL_MS` constant.
+  2. `setUsesChronometer(true)` in builder.
+  3. `setWhen(` call.
+  4. `scheduleCountdownAutoStop()` method.
+  5. `mainHandler.postDelayed` call.
+  6. `stopCapture(graceful = true)` in the Runnable.
+  7. `countdownAutoStopRunnable` cancel in
+     `stopCapture`.
+
+Verification: 141/141 audit-self-test (140 + 1 S92) +
+37/37 flutter test + S92 + S91 + S89 + S88 + S87 + S86 +
+S28-inverted + S84 + S82 + S80 all PASS. flutter
+analyze: No issues found. :app:compileDebugKotlin
+BUILD SUCCESSFUL. Fresh APK SHA captured in
+s110s-extra-final-report.md.
+
+Owner test: open the active pool screen, tap
+"Şifreleme Doğrulamayı Başlat". The foreground
+notification (in the notification bar) shows the
+chronometer counting down from "15:00" (or
+"14:23" if you tap after a few seconds). At 00:00
+the chronometer reads "00:00" for a moment, then
+the Handler fires `stopCapture(graceful = true)` and
+the VPN tears down. The screen returns to the
+pre-VPN state (no infinite run, no manual cleanup
+needed). The 11.0R "Oturumu Bitir" button still
+works for early disconnect (it cancels the pending
+Handler via the `countdownAutoStopRunnable?.let
+{ mainHandler.removeCallbacks(it) }` cleanup at the
+top of `stopCapture`).

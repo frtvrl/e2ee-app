@@ -18,6 +18,8 @@ check_pool_provider_timer_periodic_literal_present (S28 - INVERTED in 11.0O),
 check_vpn_service_mtu_and_fragment_log_v31 (S87),
 check_oturumu_bitir_2level_fallback_v32 (S88),
 check_oturumu_bitir_full_state_reset_v33 (S89),
+check_dns_private_dns_conflict_v34 (S91),
+check_notification_chronometer_autostop_v35 (S92),
 check_active_pool_haptic_feedback_literal_present (S29),
 check_pool_provider_debug_state_fields (S33),
 check_active_pool_scaffold_messenger_snackbar (S34),
@@ -167,11 +169,11 @@ S50 cases: 2 (1 PASS + 1 FAIL — `OpenE2EE Şifreleme Doğrulama` foreground no
 S51 cases: 2 (1 PASS + 1 FAIL — `i < 30` + `Timer.periodic` 30-call loop in active_pool_screen.dart).
 S52 cases: 2 (1 PASS + 1 FAIL — `sendSummary` method + `/api/v1/sessions/` path + 6 fields in telemetry_service.dart).
 
-Total: 139 cases (72 pre-Sprint 11.0A + 16 from S45-S52 + 24 from
+Total: 141 cases (72 pre-Sprint 11.0A + 16 from S45-S52 + 24 from
 S53-S60 + 24 from S61-S72 + 1 from S73 + 1 from S74 + 1 from
 S76 + 1 from S77 + 1 from S78 + 1 from S79 + 1 from S80 +
 1 from S82 + 1 from S84 + 1 from S86 + 1 from S87 +
-1 from S88 + 1 from S89).
+1 from S88 + 1 from S89 + 1 from S91 + 1 from S92).
 Sprint 11.0Q adds 1 new selftest case for S88 (2-level
 VPN disconnect fallback: .stop with 3s timeout +
 MainActivity.disconnectVpn hard-stop) — the
@@ -875,6 +877,93 @@ def run_s28_check(pool_provider_text):
         is_mock = cb_name in ("_mockTick", "_tick", "advance", "fakeTick")
         if is_mock or (not is_real_api and cb_name != "?"):
             findings.append("S28 fail (mock Timer.periodic callback " + cb_name + ")")
+    return findings
+
+
+def run_s92_check(opene2ee_vpn_service_text):
+    """Sprint 11.0S-EXTRA: notification chronometer +
+    auto-stop at 00:00 (S92).
+
+    Owner 17:21: the 15-minute countdown must
+    show in the notification bar via the native
+    Android chronometer. At 00:00 a Handler
+    postDelayed Runnable tears down the VPN
+    via stopCapture(graceful = true).
+
+    This check asserts the S92 invariants on
+    OpenE2eeVpnService.kt:
+      1. COUNTDOWN_TOTAL_MS constant.
+      2. setUsesChronometer(true) in builder.
+      3. setWhen(endTimeMs) call.
+      4. scheduleCountdownAutoStop() method.
+      5. mainHandler.postDelayed call.
+      6. stopCapture(graceful = true) in Runnable.
+      7. countdownAutoStopRunnable cancel in
+         stopCapture.
+    """
+    findings = []
+    if opene2ee_vpn_service_text is None:
+        findings.append("S92 fail (OpenE2eeVpnService.kt missing)")
+        return findings
+    if "COUNTDOWN_TOTAL_MS" not in opene2ee_vpn_service_text:
+        findings.append("S92 fail (COUNTDOWN_TOTAL_MS constant missing)")
+    if "setUsesChronometer(true)" not in opene2ee_vpn_service_text:
+        findings.append("S92 fail (setUsesChronometer(true) missing)")
+    if "setWhen(" not in opene2ee_vpn_service_text:
+        findings.append("S92 fail (setWhen( call missing)")
+    if "scheduleCountdownAutoStop" not in opene2ee_vpn_service_text:
+        findings.append("S92 fail (scheduleCountdownAutoStop method missing)")
+    if "mainHandler.postDelayed" not in opene2ee_vpn_service_text:
+        findings.append("S92 fail (mainHandler.postDelayed missing)")
+    if "stopCapture(graceful = true)" not in opene2ee_vpn_service_text:
+        findings.append("S92 fail (stopCapture(graceful=true) in Runnable missing)")
+    if "countdownAutoStopRunnable" not in opene2ee_vpn_service_text:
+        findings.append("S92 fail (countdownAutoStopRunnable cancel missing)")
+    return findings
+
+
+def run_s91_check(opene2ee_vpn_service_text, active_pool_text):
+    """Sprint 11.0S-DNS: Private DNS conflict + bindProcess
+    + Chrome DoH disable (S91).
+
+    Owner 17:14 root cause: Android 9+ Private DNS
+    (DoT) is enabled by default on OnePlus 9 Pro
+    OxygenOS and overrides the VPN's addDnsServer.
+    The fix has 3 parts:
+      A. Kotlin: LinkProperties.isPrivateDnsActive
+         check (telemetry via lastError).
+      B. Kotlin: ConnectivityManager
+         .bindProcessToNetwork(vpnNetwork).
+      C. Dart: snackbar with Private DNS + Chrome
+         DoH disable guide.
+
+    This check asserts the S91 invariants:
+      1. isPrivateDnsActive literal in
+         OpenE2eeVpnService.kt.
+      2. import android.net.ConnectivityManager.
+      3. bindProcessToNetwork call.
+      4. private_dns_active literal in
+         active_pool_screen.dart.
+      5. chrome://flags/#dns-httpssvc literal.
+    """
+    import re
+    findings = []
+    if opene2ee_vpn_service_text is None:
+        findings.append("S91 fail (OpenE2eeVpnService.kt missing)")
+    else:
+        if "isPrivateDnsActive" not in opene2ee_vpn_service_text:
+            findings.append("S91 fail (isPrivateDnsActive check missing)")
+        if "import android.net.ConnectivityManager" not in opene2ee_vpn_service_text:
+            findings.append("S91 fail (ConnectivityManager import missing)")
+        if "bindProcessToNetwork" not in opene2ee_vpn_service_text:
+            findings.append("S91 fail (bindProcessToNetwork call missing)")
+    if active_pool_text is None:
+        findings.append("S91 fail (active_pool_screen.dart missing)")
+    else:
+        if "private_dns_active" not in active_pool_text:
+            findings.append("S91 fail (private_dns_active check missing)")
+        if "chrome://flags/#dns-httpssvc" not in active_pool_text:
+            findings.append("S91 fail (chrome://flags/#dns-httpssvc literal missing)")
     return findings
 
 
@@ -4969,9 +5058,102 @@ cases = [
          "      _vpnState = VpnLifecycleState.idle;\n"
          "      _webrtcState = WebRTCState.closed;\n"
          "    });\n"
-         "    context.go('/home/gorevler');\n"
-         "    _disconnectInProgress = false;\n"
-         "  }\n"
+          "    context.go('/home/gorevler');\n"
+          "    _disconnectInProgress = false;\n"
+          "  }\n"
+          "}\n",
+      ), []),
+    # S91 case (Sprint 11.0S-DNS - new) - OpenE2eeVpnService
+    # .kt has isPrivateDnsActive + ConnectivityManager
+    # .bindProcessToNetwork + active_pool_screen.dart has
+    # private_dns_active status() poll + chrome://flags
+    # #dns-httpssvc snackbar. Regression guard for the
+    # Owner 17:14 OnePlus 9 Pro OxygenOS Android 9+
+    # Private DNS override symptom (Chrome + WhatsApp
+    # "no internet" even though TUN capture +
+    # passthrough work). Total selftest: 139 + 1 = 140.
+    ("S91 PASS (OpenE2eeVpnService.kt has isPrivateDnsActive + bindProcessToNetwork + active_pool_screen.dart has private_dns_active check + chrome://flags/#dns-httpssvc snackbar)",
+     run_s91_check,
+     (
+         "package com.opene2ee.opene2ee.vpn\n"
+         "import android.net.ConnectivityManager\n"
+         "import android.net.LinkProperties\n"
+         "import android.net.Network\n"
+         "import android.net.NetworkCapabilities\n"
+         "import android.net.NetworkRequest\n"
+         "class OpenE2eeVpnService {\n"
+         "    private fun checkPrivateDnsAndBindToVpn() {\n"
+         "        val cm = getSystemService(...) as ConnectivityManager\n"
+         "        val lp: LinkProperties? = cm.getLinkProperties(cm.activeNetwork)\n"
+         "        if (lp != null && lp.isPrivateDnsActive) {\n"
+         "            lastError = \"private_dns_active: VPN DNS bypassed\"\n"
+         "        }\n"
+         "        val request = NetworkRequest.Builder()\n"
+         "            .addTransportType(NetworkCapabilities.TRANSPORT_VPN)\n"
+         "            .build()\n"
+         "        cm.requestNetwork(request, object : ConnectivityManager.NetworkCallback() {\n"
+         "            override fun onAvailable(network: Network) {\n"
+         "                cm.bindProcessToNetwork(network)\n"
+         "            }\n"
+         "        })\n"
+         "    }\n"
+         "}\n",
+         "class _S {\n"
+         "  Future<void> _onStart() async {\n"
+         "    final status = await _vpn.status();\n"
+         "    final lastError = status['lastError'] as String?;\n"
+         "    if (lastError != null && lastError.startsWith('private_dns_active')) {\n"
+         "      ScaffoldMessenger.of(context).showSnackBar(\n"
+         "        SnackBar(\n"
+         "          content: Text('Chrome: chrome://flags/#dns-httpssvc > Disabled. '),\n"
+         "        ),\n"
+         "      );\n"
+          "    }\n"
+          "  }\n"
+          "}\n",
+      ),
+      []),
+    # S92 case (Sprint 11.0S-EXTRA - new) - OpenE2eeVpnService
+    # .kt has setUsesChronometer + setWhen + mainHandler
+    # .postDelayed auto-stop. Regression guard for the
+    # Owner 17:21 OnePlus 9 Pro "15-minute countdown must
+    # show in notification bar" requirement. Total
+    # selftest: 140 + 1 = 141.
+    ("S92 PASS (OpenE2eeVpnService.kt has COUNTDOWN_TOTAL_MS + setUsesChronometer + setWhen + scheduleCountdownAutoStop + mainHandler.postDelayed + stopCapture(graceful=true))",
+     run_s92_check, (
+         "package com.opene2ee.opene2ee.vpn\n"
+         "import android.os.Handler\n"
+         "import android.os.Looper\n"
+         "class OpenE2eeVpnService {\n"
+         "    companion object {\n"
+         "        const val COUNTDOWN_TOTAL_MS = 15L * 60L * 1000L\n"
+         "    }\n"
+         "    private val mainHandler: Handler = Handler(Looper.getMainLooper())\n"
+         "    private var countdownAutoStopRunnable: Runnable? = null\n"
+         "    private fun buildForegroundNotification(): android.app.Notification {\n"
+         "        val endTimeMs = System.currentTimeMillis() + COUNTDOWN_TOTAL_MS\n"
+         "        return androidx.core.app.NotificationCompat.Builder(this, \"chan\")\n"
+         "            .setContentTitle(\"test\")\n"
+         "            .setOngoing(true)\n"
+         "            .setUsesChronometer(true)\n"
+         "            .setWhen(endTimeMs)\n"
+         "            .setShowWhen(true)\n"
+         "            .build()\n"
+         "    }\n"
+         "    private fun scheduleCountdownAutoStop() {\n"
+         "        countdownAutoStopRunnable?.let { mainHandler.removeCallbacks(it) }\n"
+         "        val runnable = Runnable {\n"
+         "            try { stopCapture(graceful = true) } catch (e: Throwable) {}\n"
+         "            countdownAutoStopRunnable = null\n"
+         "        }\n"
+         "        countdownAutoStopRunnable = runnable\n"
+         "        mainHandler.postDelayed(runnable, COUNTDOWN_TOTAL_MS)\n"
+         "    }\n"
+         "    private fun stopCapture(graceful: Boolean): State {\n"
+         "        countdownAutoStopRunnable?.let { mainHandler.removeCallbacks(it) }\n"
+         "        countdownAutoStopRunnable = null\n"
+         "        return State.STOPPED\n"
+         "    }\n"
          "}\n",
      ), []),
     # S29 cases (Sprint 10.1A - new)

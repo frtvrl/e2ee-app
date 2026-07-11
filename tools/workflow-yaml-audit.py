@@ -3653,6 +3653,283 @@ def check_oturumu_bitir_full_state_reset_v33() -> list[str]:
     return findings
 
 
+def check_dns_private_dns_conflict_v34() -> list[str]:
+    """Sprint 11.0S-DNS: Private DNS conflict detection +
+    bindProcessToNetwork + Chrome DoH disable snackbar
+    (S91).
+
+    Owner 17:14 root cause confirmed by 5-query web
+    research (Stack Overflow, Android Developer docs,
+    celzero/rethink-app issue #25, OnePlus community,
+    Cloudflare docs):
+      1. Android 9+ Private DNS (DNS-over-TLS) is
+         enabled by default on OnePlus 9 Pro
+         OxygenOS. When enabled, the system
+         OVERRIDES the VPN's `addDnsServer(1.1.1.1)`
+         and routes all DNS queries through the
+         user's Private DNS hostname (e.g.
+         `one.one.one.one`). The VPN tunnel
+         intercepts the TUN packets but the DNS
+         resolver inside the tunnel is
+         unreachable (the user's DoT is the
+         resolver, not 1.1.1.1).
+      2. The VPN process is not bound to the VPN
+         network by default — `connectivityManager
+         .bindProcessToNetwork(vpnNetwork)` is
+         needed so cleartext DNS queries from
+         the VPN process go through the VPN
+         tunnel and hit the `addDnsServer`
+         resolvers, bypassing the system DoT
+         override.
+      3. Chrome uses its own DoH resolver
+         (`chrome://flags/#dns-httpssvc`,
+         `chrome://settings/security` Advanced
+         DNS) by default, bypassing the system
+         DoT AND the VPN DNS.
+
+    11.0S-DNS fix (3 parts):
+      A. KOTLIN: on VPN established, check
+         `LinkProperties.isPrivateDnsActive` and
+         log a warning + push telemetry
+         (`lastError = "private_dns_active: ..."`)
+         so the Dart side can show a snackbar.
+      B. KOTLIN: call
+         `ConnectivityManager.bindProcessToNetwork(
+         vpnNetwork)` to bind the process to
+         the VPN network so cleartext DNS hits
+         the VPN tunnel resolvers.
+      C. DART: poll the VPN status 1 second
+         after start; if `lastError` starts
+         with `"private_dns_active"`, show a
+         snackbar with the Private DNS disable
+         instructions (Settings > Network >
+         Private DNS > Off) AND the Chrome DoH
+         disable guide (`chrome://flags/#dns-
+         httpssvc` > Disabled + chrome://settings
+         /security > Advanced DNS > Off).
+
+    The check requires FIVE tokens across TWO
+    files (comment-stripped):
+      1. OpenE2eeVpnService.kt:
+         `isPrivateDnsActive` literal.
+      2. OpenE2eeVpnService.kt:
+         `ConnectivityManager` import.
+      3. OpenE2eeVpnService.kt:
+         `bindProcessToNetwork` literal.
+      4. active_pool_screen.dart:
+         `private_dns_active` literal (the
+         status() poll check).
+      5. active_pool_screen.dart:
+         `chrome://flags/#dns-httpssvc` literal
+         (the Chrome DoH disable URL).
+    """
+    import re
+    findings = []
+    # 1-3: OpenE2eeVpnService.kt
+    vpn_path = (
+        REPO_ROOT / "mobile" / "android" / "app" / "src" / "main"
+        / "kotlin" / "com" / "opene2ee" / "opene2ee" / "vpn"
+        / "OpenE2eeVpnService.kt"
+    )
+    if not vpn_path.exists():
+        findings.append(
+            "S91 OpenE2eeVpnService.kt: file missing."
+        )
+    else:
+        try:
+            vpn_text = vpn_path.read_text(encoding="utf-8")
+        except (UnicodeDecodeError, OSError) as e:
+            findings.append(
+                "S91 OpenE2eeVpnService.kt: read failed ("
+                + str(e) + ")."
+            )
+        else:
+            if "isPrivateDnsActive" not in vpn_text:
+                findings.append(
+                    "S91 OpenE2eeVpnService.kt: missing "
+                    "`isPrivateDnsActive` check. Sprint 11.0S-DNS "
+                    "invariant - the Kotlin service MUST check "
+                    "`LinkProperties.isPrivateDnsActive` after "
+                    "`establish()` and log + push telemetry on "
+                    "detection."
+                )
+            if "import android.net.ConnectivityManager" not in vpn_text:
+                findings.append(
+                    "S91 OpenE2eeVpnService.kt: missing "
+                    "`import android.net.ConnectivityManager`. "
+                    "Sprint 11.0S-DNS invariant - the `bindProcess"
+                    "ToNetwork` call needs the ConnectivityManager."
+                )
+            if "bindProcessToNetwork" not in vpn_text:
+                findings.append(
+                    "S91 OpenE2eeVpnService.kt: missing "
+                    "`bindProcessToNetwork` call. Sprint 11.0S-DNS "
+                    "invariant - the VPN process MUST be bound to "
+                    "the VPN network so cleartext DNS queries hit "
+                    "the `addDnsServer` resolvers (1.1.1.1/1.0.0.1) "
+                    "and bypass the system DoT override."
+                )
+    # 4-5: active_pool_screen.dart
+    screen_path = (
+        REPO_ROOT / "mobile" / "lib" / "screens"
+        / "active_pool_screen.dart"
+    )
+    if not screen_path.exists():
+        findings.append(
+            "S91 active_pool_screen.dart: file missing."
+        )
+    else:
+        try:
+            screen_text = screen_path.read_text(encoding="utf-8")
+        except (UnicodeDecodeError, OSError) as e:
+            findings.append(
+                "S91 active_pool_screen.dart: read failed ("
+                + str(e) + ")."
+            )
+        else:
+            if "private_dns_active" not in screen_text:
+                findings.append(
+                    "S91 active_pool_screen.dart: missing "
+                    "`private_dns_active` literal. Sprint 11.0S-DNS "
+                    "invariant - the Dart status() poll MUST check "
+                    "for the Kotlin `lastError` starting with "
+                    "`private_dns_active` to trigger the snackbar."
+                )
+            if "chrome://flags/#dns-httpssvc" not in screen_text:
+                findings.append(
+                    "S91 active_pool_screen.dart: missing "
+                    "`chrome://flags/#dns-httpssvc` literal. Sprint "
+                    "11.0S-DNS invariant - the snackbar MUST show "
+                    "the Chrome DoH disable URL so the user can "
+                    "fix Chrome's own DoH override (which is a "
+                    "separate layer from Android Private DNS)."
+                )
+    return findings
+
+
+def check_notification_chronometer_autostop_v35() -> list[str]:
+    """Sprint 11.0S-EXTRA: foreground notification
+    chronometer + auto-stop at 00:00 (S92).
+
+    Owner 17:21: the 15-minute countdown must also
+    be visible in the Android notification bar
+    (not just in the in-app display). The
+    implementation uses the NATIVE Android
+    `setUsesChronometer(true)` + `setWhen(endTimeMs)`
+    pattern on the foreground notification
+    builder — the system renders the countdown
+    internally (no per-second Kotlin Timer = no
+    battery drain). When the chronometer hits
+    00:00, a Handler.postDelayed Runnable fires
+    once and calls `stopCapture(graceful = true)`
+    to tear down the VPN.
+
+    The check requires SIX tokens in
+    `OpenE2eeVpnService.kt` (comment-stripped):
+      1. `COUNTDOWN_TOTAL_MS` constant
+        (15 * 60 * 1000).
+      2. `setUsesChronometer(true)` call in the
+        notification builder.
+      3. `setWhen(endTimeMs)` call in the
+        notification builder (or `setWhen(`).
+      4. `scheduleCountdownAutoStop()` method
+        that posts the Runnable.
+      5. `mainHandler.postDelayed(runnable,
+        COUNTDOWN_TOTAL_MS)` call (the auto-stop
+        wakeup).
+      6. `stopCapture(graceful = true)` call in
+        the auto-stop Runnable (the action).
+      7. `countdownAutoStopRunnable?.let` cancel
+        in `stopCapture` (so manual disconnect
+        doesn't leave a pending 00:00 wakeup).
+    """
+    import re
+    findings = []
+    vpn_path = (
+        REPO_ROOT / "mobile" / "android" / "app" / "src" / "main"
+        / "kotlin" / "com" / "opene2ee" / "opene2ee" / "vpn"
+        / "OpenE2eeVpnService.kt"
+    )
+    if not vpn_path.exists():
+        findings.append(
+            "S92 OpenE2eeVpnService.kt: file missing."
+        )
+        return findings
+    try:
+        text = vpn_path.read_text(encoding="utf-8")
+    except (UnicodeDecodeError, OSError) as e:
+        findings.append(
+            "S92 OpenE2eeVpnService.kt: read failed ("
+            + str(e) + ")."
+        )
+        return findings
+    if "COUNTDOWN_TOTAL_MS" not in text:
+        findings.append(
+            "S92 OpenE2eeVpnService.kt: missing "
+            "`COUNTDOWN_TOTAL_MS` constant. Sprint 11.0S-EXTRA "
+            "invariant - the 15-minute duration must be a named "
+            "constant (15L * 60L * 1000L) so the chronometer "
+            "setWhen and the Handler.postDelayed agree."
+        )
+    if "setUsesChronometer(true)" not in text:
+        findings.append(
+            "S92 OpenE2eeVpnService.kt: missing "
+            "`setUsesChronometer(true)` in the notification "
+            "builder. Sprint 11.0S-EXTRA invariant - the "
+            "native Android chronometer is what renders the "
+            "countdown in the notification bar (no Kotlin "
+            "Timer needed = no per-second battery drain)."
+        )
+    if "setWhen(" not in text:
+        findings.append(
+            "S92 OpenE2eeVpnService.kt: missing `setWhen(` "
+            "call. Sprint 11.0S-EXTRA invariant - the "
+            "chronometer needs the target time "
+            "(now + COUNTDOWN_TOTAL_MS) to count down to."
+        )
+    if "scheduleCountdownAutoStop" not in text:
+        findings.append(
+            "S92 OpenE2eeVpnService.kt: missing "
+            "`scheduleCountdownAutoStop()` method. Sprint "
+            "11.0S-EXTRA invariant - the auto-stop Handler "
+            "must be scheduled in startCapture after the "
+            "foreground notification is posted."
+        )
+    if "mainHandler.postDelayed" not in text:
+        findings.append(
+            "S92 OpenE2eeVpnService.kt: missing "
+            "`mainHandler.postDelayed` call. Sprint 11.0S-EXTRA "
+            "invariant - the auto-stop must be a Handler on the "
+            "main looper, NOT a Timer.periodic (the system "
+            "chronometer handles the per-second display)."
+        )
+    if "stopCapture(graceful = true)" not in text:
+        findings.append(
+            "S92 OpenE2eeVpnService.kt: missing "
+            "`stopCapture(graceful = true)` in the auto-stop "
+            "Runnable. Sprint 11.0S-EXTRA invariant - at 00:00 "
+            "the Runnable must call stopCapture to tear down "
+            "the VPN gracefully (close TUN, drain, notify Dart)."
+        )
+    if "countdownAutoStopRunnable?.let" not in text and "countdownAutoStopRunnable" not in text:
+        findings.append(
+            "S92 OpenE2eeVpnService.kt: missing the "
+            "`countdownAutoStopRunnable` cancel in "
+            "`stopCapture`. Sprint 11.0S-EXTRA invariant - "
+            "manual disconnect must cancel the pending 00:00 "
+            "Handler so the wakeup doesn't fire on a stopped "
+            "service (which would be a no-op or worse, a "
+            "re-entrant teardown)."
+        )
+    return findings
+
+
+
+
+
+
+
+
 
 
 
@@ -6774,6 +7051,18 @@ def main() -> int:
         all_findings.extend(s89_findings)
     else:
         print("PASS: active_pool_screen.dart has full state reset on disconnect (subscriptions cancelled + counters cleared + UI reset + button disabled while in flight + navigation to /home/gorevler) - regression guard for OnePlus 9 Pro 'packet counter keeps growing after disconnect' symptom - Sprint 11.0R S89")
+
+    s91_findings = check_dns_private_dns_conflict_v34()
+    if s91_findings:
+        all_findings.extend(s91_findings)
+    else:
+        print("PASS: OpenE2eeVpnService.kt checks LinkProperties.isPrivateDnsActive + ConnectivityManager.bindProcessToNetwork(TRANSPORT_VPN) + active_pool_screen.dart shows Private DNS + Chrome DoH disable snackbar - regression guard for OnePlus 9 Pro OxygenOS Android 9+ Private DNS override - Sprint 11.0S-DNS S91")
+
+    s92_findings = check_notification_chronometer_autostop_v35()
+    if s92_findings:
+        all_findings.extend(s92_findings)
+    else:
+        print("PASS: OpenE2eeVpnService.kt has foreground notification setUsesChronometer + setWhen(now+15min) + Handler.postDelayed auto-stop at 00:00 - regression guard for OnePlus 9 Pro 15-minute session cap - Sprint 11.0S-EXTRA S92")
 
     # Sprint 10.1A: HapticFeedback / SystemSound literal in active pool screen (S29).
     s29_findings = check_active_pool_haptic_feedback_literal_present()

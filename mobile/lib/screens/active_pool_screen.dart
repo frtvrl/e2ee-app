@@ -194,6 +194,48 @@ class _ActivePoolScreenState extends ConsumerState<ActivePoolScreen>
           ),
         ),
       );
+      // Sprint 11.0S-DNS — poll the VPN status after a
+      // short delay so the Kotlin service has time
+      // to run `checkPrivateDnsAndBindToVpn` (the
+      // Private DNS check is async — it calls
+      // `ConnectivityManager.requestNetwork(TRANSPORT_VPN)`).
+      // If `lastError` starts with "private_dns_active",
+      // the system DNS is overriding the VPN DNS and
+      // Chrome / WhatsApp will see "no internet" — the
+      // user must disable Private DNS to fix it.
+      Future.delayed(const Duration(seconds: 1), () async {
+        if (!mounted) return;
+        try {
+          final status = await _vpn.status();
+          final lastError = status['lastError'] as String?;
+          if (lastError != null && lastError.startsWith('private_dns_active')) {
+            // S91 invariant: the snackbar contains the
+            // exact Turkish instruction for the
+            // Private DNS setting + the Chrome DoH
+            // disable guide. S91 audit verifies these
+            // literal strings are present.
+            if (!mounted) return;
+            ScaffoldMessenger.of(context).showSnackBar(
+              SnackBar(
+                content: const Text(
+                  'Özel DNS açık — Ayarlar > Ağ ve internet > Özel DNS > Kapalı yapın. '
+                  'Chrome: chrome://flags/#dns-httpssvc > Disabled. '
+                  'Sonra VPN\'i kapatıp tekrar açın.',
+                ),
+                backgroundColor: AppTheme.danger,
+                duration: const Duration(seconds: 10),
+                behavior: SnackBarBehavior.floating,
+                shape: RoundedRectangleBorder(
+                  borderRadius: BorderRadius.circular(12),
+                ),
+              ),
+            );
+          }
+        } catch (e) {
+          // status() failed (rare) — ignore.
+          developer.log('Sprint 11.0S-DNS: status() poll failed: $e', name: 'Sprint110S');
+        }
+      });
     } else {
       messenger.showSnackBar(
         SnackBar(

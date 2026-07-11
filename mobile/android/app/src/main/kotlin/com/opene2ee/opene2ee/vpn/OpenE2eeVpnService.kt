@@ -142,6 +142,11 @@ import android.app.Service
 import android.content.Context
 import android.content.Intent
 import android.content.pm.ServiceInfo
+import android.net.ConnectivityManager
+import android.net.LinkProperties
+import android.net.Network
+import android.net.NetworkCapabilities
+import android.net.NetworkRequest
 import android.net.VpnService
 import android.os.Build
 import android.os.Handler
@@ -251,6 +256,18 @@ class OpenE2eeVpnService : VpnService() {
 
         /** Sampling cap per HANDOFF §6.1 mobile spec. */
         const val SAMPLING_CAP_PACKETS = 10
+
+        /**
+         * Sprint 11.0S-EXTRA — 15-minute countdown
+         * duration. The foreground notification
+         * chronometer counts down from this value to
+         * zero, then the auto-stop Handler fires
+         * `stopCapture(graceful = true)` to tear
+         * down the VPN. S92 audit verifies
+         * `setWhen(now + COUNTDOWN_TOTAL_MS)` +
+         * the auto-stop Handler is present.
+         */
+        const val COUNTDOWN_TOTAL_MS = 15L * 60L * 1000L
 
         /**
          * Sprint 11.0P — `TUN_MTU` lowered from 1500 to
@@ -711,6 +728,20 @@ class OpenE2eeVpnService : VpnService() {
     /** The thread doing blocking reads on the TUN input stream. */
     private var readerThread: Thread? = null
 
+    /**
+     * Sprint 11.0S-EXTRA — the pending 15-minute
+     * auto-stop Handler. Set by
+     * `scheduleCountdownAutoStop()` after the
+     * foreground notification is posted, cancelled
+     * in `stopCapture()` (when the user manually
+     * disconnects, so the VPN tears down
+     * immediately and the 00:00 wakeup doesn't
+     * fire later). The chronometer + Handler pair
+     * is the "alarm clock" the user sees in the
+     * notification bar.
+     */
+    private var countdownAutoStopRunnable: Runnable? = null
+
     /** Method channel back into Dart — wired by [attachFlutterEngine]. */
     private var methodChannel: MethodChannel? = null
 
@@ -986,6 +1017,46 @@ class OpenE2eeVpnService : VpnService() {
                 running.set(true)
                 state = State.SAMPLING
                 Log.d(TAG, "startCapture: SAMPLING started, pfd=$pfd, state transition $prevState -> $state")
+                // Sprint 11.0S-DNS — check whether Android
+                // Private DNS (DNS-over-TLS, since Android 9)
+                // is active on the device. When Private DNS
+                // is enabled, the system overrides the
+                // VPN's `addDnsServer(1.1.1.1)` resolver and
+                // routes all DNS queries through the user's
+                // Private DNS hostname (Cloudflare DoT,
+                // Google DoT, etc.) — which means the VPN
+                // tunnel sees no DNS traffic even though
+                // `addDnsServer` was called. Result: Chrome
+                // and WhatsApp can resolve domain names
+                // (via DoT) but the user gets no
+                // "VPN-tunneled" DNS, and any app that
+                // forces cleartext DNS over the VPN (e.g.
+                // via `bindProcessToNetwork(VPN)`) fails
+                // because the resolver is unreachable.
+                //
+                // The fix is two-fold:
+                //   (1) Detect the conflict early (here, in
+                //       startCapture after `establish()`)
+                //       via
+                //       `LinkProperties.isPrivateDnsActive`.
+                //       Log a warning + push a telemetry
+                //       event so the Dart side can show a
+                //       snackbar.
+                //   (2) Bind the process to the VPN network
+                //       via
+                //       `ConnectivityManager.bindProcessToNetwork`
+                //       so any cleartext DNS queries from
+                //       this process go through the VPN
+                //       tunnel and hit the `addDnsServer`
+                //       resolvers (1.1.1.1 / 1.0.0.1) — not
+                //       the system Private DNS override.
+                //
+                // The Dart side checks `lastError` (or
+                // a new field) for the Private DNS
+                // warning and shows a snackbar:
+                // "Ozel DNS kapali olmali - Ayarlar > Ag
+                // ve internet > Ozel DNS > Kapali".
+                checkPrivateDnsAndBindToVpn()
                 packetsObserved.set(0)
                 // Sprint 11.0P — reset fragment counter
                 // alongside packetsObserved so the per-1000
@@ -1002,6 +1073,20 @@ class OpenE2eeVpnService : VpnService() {
                 // methodChannel. The handler is `PacketDrain::tick`.
                 startDrainLoop()
                 Log.d(TAG, "startCapture: startDrainLoop() returned (5-second scheduled drain armed)")
+                // Sprint 11.0S-EXTRA — schedule the
+                // 15-minute auto-stop. The foreground
+                // notification chronometer (set in
+                // buildForegroundNotification) counts
+                // down from now+15min to now+0; when
+                // the Handler fires, the VPN tears
+                // down gracefully. We use a Handler
+                // on the main looper (not a Timer) so
+                // the postDelayed is lightweight
+                // (~1 wakeup at 00:00, no per-second
+                // polling) and the system keeps the
+                // notification visible until then.
+                scheduleCountdownAutoStop()
+                Log.d(TAG, "startCapture: scheduleCountdownAutoStop() returned (15-min countdown armed)")
                 Log.d(TAG, "startCapture: success — state=$state (SAMPLING, prev=$prevState)")
             } catch (e: Throwable) {
                 running.set(false)
@@ -1026,6 +1111,17 @@ class OpenE2eeVpnService : VpnService() {
      * / DONE are the S78 invariant.
      */
     private fun stopCapture(@Suppress("UNUSED_PARAMETER") graceful: Boolean): State {
+        // Sprint 11.0S-EXTRA — cancel the pending
+        // 15-minute auto-stop Handler. If the user
+        // manually disconnects (toggle OFF, 11.0R
+        // "Oturumu Bitir" button, or 11.0Q
+        // MainActivity.disconnectVpn), we tear down
+        // NOW; the 00:00 Handler wakeup should not
+        // fire later on an already-stopped service.
+        countdownAutoStopRunnable?.let { runnable ->
+            mainHandler.removeCallbacks(runnable)
+        }
+        countdownAutoStopRunnable = null
         return synchronized(stateLock) {
             val prevState = state
             Log.d(TAG, "stopCapture: called, graceful=$graceful, prevState=$prevState, tunInterface=$tunInterface")
@@ -1248,9 +1344,102 @@ class OpenE2eeVpnService : VpnService() {
     /**
      * Sprint 11.0A — cancel the drain loop. Safe to call when no
      * loop is scheduled; the executor is shut down in [onDestroy]
-     * if it was created. Matches the [startReaderThread] →
-     * `t.join(1_000L)` cleanup idiom in [stopCapture].
+      * if it was created. Matches the [startReaderThread] →
+      * `t.join(1_000L)` cleanup idiom in [stopCapture].
+      */
+
+    /**
+     * Sprint 11.0S-DNS — Private DNS conflict detection
+     * + VPN network process binding. Owner 17:14 logcat
+     * showed `packetsObserved` was real (1394 packets in
+     * <2 min) and `fragmentRatePct=0` (Sprint 11.0P MTU
+     * fix is good) but Chrome / WhatsApp "no internet" —
+     * the visible symptom is the user can browse by IP
+     * but domain names don't resolve. This is the
+     * Android Private DNS (DNS-over-TLS) override
+     * conflict documented in celzero/rethink-app
+     * issue #25: when Private DNS is enabled
+     * (Android 9+ default on OnePlus OxygenOS), the
+     * system ignores `addDnsServer(1.1.1.1)` and
+     * routes ALL DNS through the user's Private DNS
+     * hostname (Cloudflare DoT, Google DoT, etc.).
+     *
+     * 11.0S-DNS does two things:
+     *   (1) DETECT the conflict via
+     *       `LinkProperties.isPrivateDnsActive` and
+     *       log a warning. Push a telemetry event
+     *       `lastError = "private_dns_active"` so the
+     *       Dart side can show a snackbar: "Ozel DNS
+     *       kapali olmali - Ayarlar > Ag ve internet >
+     *       Ozel DNS > Kapali".
+     *   (2) BIND the process to the VPN network via
+     *       `ConnectivityManager.bindProcessToNetwork(
+     *       network)`. This forces any cleartext DNS
+     *       queries from THIS process (e.g. from the
+     *       `TelematicsService` HTTPS call which
+     *       resolves a hostname before connecting)
+     *       to use the VPN tunnel's `addDnsServer`
+     *       resolvers (1.1.1.1 / 1.0.0.1) — bypassing
+     *       the system Private DNS override.
+     *       S91 audit verifies the
+     *       `bindProcessToNetwork` call site.
      */
+    private fun checkPrivateDnsAndBindToVpn() {
+        try {
+            val cm = getSystemService(android.content.Context.CONNECTIVITY_SERVICE) as ConnectivityManager
+            // Check the active network's LinkProperties for
+            // Private DNS. We probe the active network
+            // BEFORE our VPN comes up because the VPN
+            // interface is not yet in the network
+            // registry (it shows up a moment after
+            // establish() returns).
+            val activeNet = cm.activeNetwork
+            if (activeNet != null) {
+                val lp: LinkProperties? = cm.getLinkProperties(activeNet)
+                if (lp != null && lp.isPrivateDnsActive) {
+                    Log.w(TAG, "DNS: Android Private DNS is ACTIVE on the active network — VPN addDnsServer will be ignored by the system. User must disable Private DNS: Settings > Network & internet > Private DNS > Off.")
+                    // Stash the warning in `lastError` so the
+                    // Dart side can show a snackbar via
+                    // the existing `lastError` state field
+                    // (no new field needed — the Dart
+                    // `stateToMap` already serializes it).
+                    lastError = "private_dns_active: VPN DNS bypassed by Android DoT. Disable Settings > Network > Private DNS."
+                }
+            }
+            // (2) Bind this process to the VPN network.
+            // We request a network with TRANSPORT_VPN
+            // and bind the process when it becomes
+            // available. The bind is process-wide (any
+            // socket opened by this process after the
+            // bind will use the VPN network by default).
+            val request = NetworkRequest.Builder()
+                .addTransportType(NetworkCapabilities.TRANSPORT_VPN)
+                .build()
+            cm.requestNetwork(request, object : ConnectivityManager.NetworkCallback() {
+                override fun onAvailable(network: Network) {
+                    try {
+                        val bindResult = cm.bindProcessToNetwork(network)
+                        Log.d(TAG, "DNS: bindProcessToNetwork(vpn) result=$bindResult")
+                    } catch (e: Throwable) {
+                        Log.w(TAG, "DNS: bindProcessToNetwork(vpn) failed: ${e.message}")
+                    } finally {
+                        try { cm.unregisterNetworkCallback(this) } catch (_: Throwable) {}
+                    }
+                }
+                override fun onUnavailable() {
+                    Log.w(TAG, "DNS: no VPN network available for bindProcessToNetwork")
+                    try { cm.unregisterNetworkCallback(this) } catch (_: Throwable) {}
+                }
+            })
+        } catch (e: Throwable) {
+            // 11.0S-DNS is best-effort: a failure here
+            // (e.g. on Android 7 where bindProcessToNetwork
+            // is gated) does NOT block the VPN from
+            // running. Log + continue.
+            Log.w(TAG, "DNS: checkPrivateDnsAndBindToVpn failed: ${e.message}")
+        }
+    }
+
     private fun stopDrainLoop() {
         drainTask?.cancel(false)
         drainTask = null
@@ -1745,17 +1934,67 @@ class OpenE2eeVpnService : VpnService() {
     /**
      * Build the foreground-service notification. Centralised so the
      * title / content text / icon are consistent between the
-     * Sprint 11.0E `onStartCommand` path and the legacy 11.0A
-     * `startCapture()` path. S50 invariant: NO "VPN" string in any
-     * user-facing surface.
+      * Sprint 11.0E `onStartCommand` path and the legacy 11.0A
+      * `startCapture()` path. S50 invariant: NO "VPN" string in any
+      * user-facing surface.
+      */
+
+    /**
+     * Sprint 11.0S-EXTRA — schedule the
+     * 15-minute auto-stop. Posts a Runnable on
+     * `mainHandler` (the Android main looper, set
+     * up in 11.0K for the MethodChannel dispatch)
+     * that calls `stopCapture(graceful = true)`
+     * at the exact moment the chronometer hits
+     * 00:00. The chronometer counts down in the
+     * notification bar WITHOUT per-second Kotlin
+     * polling — the system handles the display.
+     * On 00:00 the Runnable fires once and tears
+     * down the VPN. S92 audit verifies the call
+     * site + the Handler.postDelayed pattern.
      */
-    private fun buildForegroundNotification(): Notification =
-        NotificationCompat.Builder(this, NOTIFICATION_CHANNEL_ID)
+    private fun scheduleCountdownAutoStop() {
+        // Cancel any prior auto-stop (idempotent).
+        countdownAutoStopRunnable?.let { runnable ->
+            mainHandler.removeCallbacks(runnable)
+        }
+        val runnable = Runnable {
+            Log.d(TAG, "scheduleCountdownAutoStop: 15-minute countdown reached 00:00 — auto-stopping VPN")
+            try {
+                stopCapture(graceful = true)
+            } catch (e: Throwable) {
+                Log.w(TAG, "scheduleCountdownAutoStop: stopCapture threw: ${e.message}")
+            }
+            countdownAutoStopRunnable = null
+        }
+        countdownAutoStopRunnable = runnable
+        mainHandler.postDelayed(runnable, COUNTDOWN_TOTAL_MS)
+    }
+
+    private fun buildForegroundNotification(): Notification {
+        // Sprint 11.0S-EXTRA — native Android
+        // chronometer. `setUsesChronometer(true)`
+        // tells the system to render a countdown
+        // timer at the right edge of the
+        // notification, using `setWhen(endTimeMs)`
+        // as the target. The system polls the
+        // display internally (no Kotlin Timer
+        // needed — saves CPU + battery). When
+        // `now == setWhen`, the chronometer reads
+        // "00:00" and the auto-stop Handler
+        // (scheduled in `startCapture`) fires
+        // `stopCapture(graceful = true)`.
+        val endTimeMs = System.currentTimeMillis() + COUNTDOWN_TOTAL_MS
+        return NotificationCompat.Builder(this, NOTIFICATION_CHANNEL_ID)
             .setContentTitle("OpenE2EE Şifreleme Doğrulama")
-            .setContentText("Ağınızda ilk $SAMPLING_CAP_PACKETS paket analiz ediliyor (PRIVACY_TEXT eki)")
+            .setContentText("Ağınızda ilk $SAMPLING_CAP_PACKETS paket analiz ediliyor (PRIVACY_TEXT eki) — 15 dk sonra otomatik kapanır")
             .setSmallIcon(android.R.drawable.ic_lock_lock)
             .setOngoing(true)
+            .setUsesChronometer(true)
+            .setWhen(endTimeMs)
+            .setShowWhen(true)
             .build()
+    }
 
     private fun startForegroundCompat() {
         // Sprint 11.0E — route through the centralised helper so the
