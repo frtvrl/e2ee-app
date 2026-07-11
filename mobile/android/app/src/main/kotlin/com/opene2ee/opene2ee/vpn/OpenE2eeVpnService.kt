@@ -712,6 +712,40 @@ class OpenE2eeVpnService : VpnService() {
      */
     private val ipFragmentCount = AtomicLong(0)
 
+    /**
+     * Sprint 11.0T — passthrough write counter. Owner
+     * 18:19 reported that `curl 212.64.210.85/healthz`
+     * works WITHOUT the VPN (the upstream Patroni
+     * answers) but FAILS with the VPN (the user sees
+     * "no route to host" / timeout). Sprint 11.0J
+     * added the transparent passthrough (`output
+     .write(buf, 0, n)`) but Owner 18:19 confirmed
+     * it doesn't actually write the bytes. This
+     * counter increments EXACTLY ONCE per
+     * successful `output.write(buf, 0, n)` and is
+     * the canonical diagnostic for the Owner to
+     * grep `adb logcat` after a `curl 212.64.210.85/
+     * healthz` test:
+     *   - If `passthroughCount` is 0 → write is
+     *     never called (or never succeeds). The
+     *     reader thread is in an error state
+     *     BEFORE the write.
+     *   - If `passthroughCount` > 0 but `curl`
+     *     still fails → the write IS happening
+     *     but the bytes are not reaching the
+     *     kernel (the OS drops them, the TUN fd
+     *     is closed, Magisk Zygisk interferes, etc.).
+     *   - If `passthroughCount` equals
+     *     `packetsObserved` (the per-1000 log
+     *     breadcrumb compares both) → every
+     *     captured packet is also being
+     *     passthrough-written (the healthy state).
+     * S93 audit verifies this field is declared
+     * AND is reset in startCapture AND is
+     * incremented in the write call block.
+     */
+    private val passthroughCount = AtomicLong(0)
+
     /** True while TUN loop is running. */
     private val running = AtomicBoolean(false)
 
@@ -1063,6 +1097,12 @@ class OpenE2eeVpnService : VpnService() {
                 // log breadcrumb measures the new session
                 // (not the previous one's fragments).
                 ipFragmentCount.set(0)
+                // Sprint 11.0T — reset passthrough counter
+                // alongside packetsObserved so the per-1000
+                // log breadcrumb compares the new session's
+                // read+write counts (not the previous
+                // session's).
+                passthroughCount.set(0)
                 synchronized(ringLock) { ring.clear() }
                 startForegroundCompat()
                 Log.d(TAG, "startCapture: startForegroundCompat() returned (foreground promotion OK)")
@@ -1624,7 +1664,29 @@ class OpenE2eeVpnService : VpnService() {
                             Log.d(TAG, "startReaderThread: MTU=$TUN_MTU, " +
                                     "packetsObserved=$total, " +
                                     "ipFragmentCount=$fragments, " +
-                                    "fragmentRatePct=${"%.2f".format(fragRatePct)}")
+                                    "fragmentRatePct=${"%.2f".format(fragRatePct)}, " +
+                                    // Sprint 11.0T — passthrough
+                                    // diagnostic. Owner 18:19
+                                    // reported passthrough is NOT
+                                    // writing. The Owner greps
+                                    // `adb logcat` for this line
+                                    // and confirms
+                                    // `passthroughCount == packetsObserved`
+                                    // (every captured packet is
+                                    // also being passthrough-written).
+                                    // If `passthroughCount` is 0
+                                    // after a `curl 212.64.210.85/healthz`
+                                    // test, the write is failing
+                                    // (the `try { output.write ...`
+                                    // catch block is the source —
+                                    // grep the Log.e line for
+                                    // the exception class).
+                                    "passthroughCount=${passthroughCount.get()}, " +
+                                    "passthroughGap=${
+                                        if (total > 0)
+                                            total - passthroughCount.get()
+                                        else 0L
+                                    }")
                         }
                         if (packetsObserved.get() == SAMPLING_CAP_PACKETS) {
                             // Notify Dart early so the UI can react mid-session.
@@ -1660,17 +1722,77 @@ class OpenE2eeVpnService : VpnService() {
                     // Owner-12:31's "VPN active, internet OK, UI
                     // never updates" — 98 packets in 80s, drain
                     // tick visible, but Dart never got the events.
-                    try {
+                    // Sprint 11.0T — 5-LIMBED DEBUG per
+                    // Owner 18:19. The brief: passthrough
+                    // is NOT actually writing (curl
+                    // 212.64.210.85/healthz fails with VPN,
+                    // works without). 5 limbs:
+                    //   1. tun.write() called per
+                    //      read+write — Log.d + passthroughCount
+                    //      increment.
+                    //   2. output stream valid? —
+                    //      pfd.fileDescriptor.valid() check.
+                    //   3. output.flush() immediate?
+                    //      Yes (per-packet) — see
+                    //      `try { output.flush() }` below.
+                    //   4. DNS UDP 53 capture? — detect
+                    //      the IP protocol + UDP dst port 53
+                    //      and log so the Owner can grep.
+                    //   5. passthrough count for any IP
+                    //      (e.g. 212.64.210.85) > 0? —
+                    //      surfaced in the per-1000-packet
+                    //      breadcrumb below.
+                    // (2) pfd validity check.
+                    if (!pfd.fileDescriptor.valid()) {
+                        Log.e(TAG, "startReaderThread: TUN pfd.fileDescriptor.valid() = false (fd revoked?); exiting reader loop")
+                        break
+                    }
+                    val writeOk = try {
+                        // (1) write + flush + increment.
                         output.write(buf, 0, n)
                         output.flush()
+                        passthroughCount.incrementAndGet()
+                        true
                     } catch (e: IOException) {
                         // TUN output closed mid-flight — common during
                         // the Magisk Zygisk revoke path (Sprint 11.0H).
                         // Log and exit the reader loop; the service
                         // will tear down via `onRevoke` /
                         // `stopCapture`.
-                        Log.w(TAG, "startReaderThread: TUN output write failed (n=$n): ${e.message}; exiting reader loop")
-                        break
+                        Log.e(TAG, "startReaderThread: TUN output write FAILED (IOException, n=$n, packetsObserved=${packetsObserved.get()}, passthroughCount=${passthroughCount.get()}): ${e.message}; exiting reader loop", e)
+                        false
+                    } catch (t: Throwable) {
+                        // (5) broader Throwable catch — the
+                        // Owner 18:19 root cause may be a
+                        // non-IOException (e.g. an
+                        // IllegalStateException on a closed
+                        // AutoCloseOutputStream). Log + exit
+                        // so `adb logcat` shows the actual
+                        // exception class + message.
+                        Log.e(TAG, "startReaderThread: TUN output write FAILED (UNEXPECTED Throwable, n=$n, packetsObserved=${packetsObserved.get()}, passthroughCount=${passthroughCount.get()}): ${t.javaClass.simpleName}: ${t.message}", t)
+                        false
+                    }
+                    if (!writeOk) break
+                    // (4) DNS UDP 53 detection. IPv4
+                    // protocol = 17, UDP header at offset
+                    // 9 of IP packet, dst port at offset
+                    // 2 of UDP header (in big-endian).
+                    // Log every 50th DNS packet so the
+                    // Owner can grep `adb logcat` to
+                    // confirm DNS queries are reaching
+                    // the TUN.
+                    if (n >= 28 && (buf[0].toInt() and 0xFF) ushr 4 == 4) {
+                        val proto = buf[9].toInt() and 0xFF
+                        if (proto == 17 && n >= 28) {
+                            val udpDst = (buf[22].toInt() and 0xFF) shl 8 or
+                                (buf[23].toInt() and 0xFF)
+                            if (udpDst == 53 || udpDst == 853) {
+                                val dnsCount = passthroughCount.get()
+                                if (dnsCount % 50 == 0L) {
+                                    Log.d(TAG, "startReaderThread: DNS packet captured (UDP dst port $udpDst, n=$n, passthroughCount=$dnsCount)")
+                                }
+                            }
+                        }
                     }
                 }
             } catch (t: Throwable) {

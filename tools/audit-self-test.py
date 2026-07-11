@@ -20,6 +20,7 @@ check_oturumu_bitir_2level_fallback_v32 (S88),
 check_oturumu_bitir_full_state_reset_v33 (S89),
 check_dns_private_dns_conflict_v34 (S91),
 check_notification_chronometer_autostop_v35 (S92),
+check_vpn_service_passthrough_count_invariant_v36 (S93),
 check_active_pool_haptic_feedback_literal_present (S29),
 check_pool_provider_debug_state_fields (S33),
 check_active_pool_scaffold_messenger_snackbar (S34),
@@ -169,11 +170,12 @@ S50 cases: 2 (1 PASS + 1 FAIL — `OpenE2EE Şifreleme Doğrulama` foreground no
 S51 cases: 2 (1 PASS + 1 FAIL — `i < 30` + `Timer.periodic` 30-call loop in active_pool_screen.dart).
 S52 cases: 2 (1 PASS + 1 FAIL — `sendSummary` method + `/api/v1/sessions/` path + 6 fields in telemetry_service.dart).
 
-Total: 141 cases (72 pre-Sprint 11.0A + 16 from S45-S52 + 24 from
+Total: 142 cases (72 pre-Sprint 11.0A + 16 from S45-S52 + 24 from
 S53-S60 + 24 from S61-S72 + 1 from S73 + 1 from S74 + 1 from
 S76 + 1 from S77 + 1 from S78 + 1 from S79 + 1 from S80 +
 1 from S82 + 1 from S84 + 1 from S86 + 1 from S87 +
-1 from S88 + 1 from S89 + 1 from S91 + 1 from S92).
+1 from S88 + 1 from S89 + 1 from S91 + 1 from S92 +
+1 from S93).
 Sprint 11.0Q adds 1 new selftest case for S88 (2-level
 VPN disconnect fallback: .stop with 3s timeout +
 MainActivity.disconnectVpn hard-stop) — the
@@ -877,6 +879,52 @@ def run_s28_check(pool_provider_text):
         is_mock = cb_name in ("_mockTick", "_tick", "advance", "fakeTick")
         if is_mock or (not is_real_api and cb_name != "?"):
             findings.append("S28 fail (mock Timer.periodic callback " + cb_name + ")")
+    return findings
+
+
+def run_s93_check(opene2ee_vpn_service_text):
+    """Sprint 11.0T: OpenE2eeVpnService.kt passthrough
+    counter invariant (S93).
+
+    Owner 18:19 symptom: passthrough is NOT actually
+    writing (curl 212.64.210.85/healthz fails with
+    VPN, works without). 5-limb debug + per-write
+    counter are required.
+
+    This check asserts the S93 invariants on the
+    OpenE2eeVpnService.kt source:
+      1. passthroughCount AtomicLong field.
+      2. passthroughCount.set(0) reset in
+         startCapture.
+      3. pfd.fileDescriptor.valid check before
+         write.
+      4. passthroughCount.incrementAndGet() after
+         successful write.
+      5. catch(Throwable) for the write block
+         (broader than just IOException).
+      6. passthroughCount + passthroughGap in
+         per-1000-packet breadcrumb.
+    """
+    import re
+    findings = []
+    if opene2ee_vpn_service_text is None:
+        findings.append("S93 fail (OpenE2eeVpnService.kt missing)")
+        return findings
+    if not re.search(
+        r"private\s+val\s+passthroughCount\s*=\s*AtomicLong\s*\(\s*0\s*\)",
+        opene2ee_vpn_service_text,
+    ):
+        findings.append("S93 fail (passthroughCount AtomicLong field missing)")
+    if "passthroughCount.set(0)" not in opene2ee_vpn_service_text:
+        findings.append("S93 fail (passthroughCount.set(0) reset missing)")
+    if "pfd.fileDescriptor.valid" not in opene2ee_vpn_service_text:
+        findings.append("S93 fail (pfd.fileDescriptor.valid check missing)")
+    if "passthroughCount.incrementAndGet" not in opene2ee_vpn_service_text:
+        findings.append("S93 fail (passthroughCount.incrementAndGet missing)")
+    if not re.search(r"catch\s*\(\s*t\s*:\s*Throwable\s*\)", opene2ee_vpn_service_text):
+        findings.append("S93 fail (catch(Throwable) on write block missing)")
+    if "passthroughGap" not in opene2ee_vpn_service_text:
+        findings.append("S93 fail (passthroughGap in breadcrumb missing)")
     return findings
 
 
@@ -4982,6 +5030,53 @@ cases = [
           "    }\n"
           "}\n",
       ), []),
+    # S93 case (Sprint 11.0T - new) - OpenE2eeVpnService
+    # .kt has passthroughCount AtomicLong + reset +
+    # pfd.fileDescriptor.valid check + per-write
+    # increment + catch(Throwable) on write block +
+    # passthroughGap in per-1000-packet breadcrumb.
+    # Regression guard for the Owner 18:19 "passthrough
+    # not actually writing" symptom (curl
+    # 212.64.210.85/healthz fails with VPN, works
+    # without). Total selftest: 141 + 1 = 142.
+    ("S93 PASS (OpenE2eeVpnService.kt has passthroughCount AtomicLong + per-write increment + pfd.fileDescriptor.valid check + catch(Throwable) Log.e + passthroughGap in breadcrumb)",
+     run_s93_check, (
+         "package com.opene2ee.opene2ee.vpn\n"
+         "import java.util.concurrent.atomic.AtomicLong\n"
+         "class OpenE2eeVpnService {\n"
+         "    private val passthroughCount = AtomicLong(0)\n"
+         "    private fun startCapture() {\n"
+         "        packetsObserved.set(0)\n"
+         "        passthroughCount.set(0)\n"
+         "    }\n"
+         "    private fun startReaderThread(pfd: android.os.ParcelFileDescriptor) {\n"
+         "        try {\n"
+         "            while (true) {\n"
+         "                val n = 100\n"
+         "                if (!pfd.fileDescriptor.valid()) break\n"
+         "                val writeOk = try {\n"
+         "                    output.write(buf, 0, n)\n"
+         "                    output.flush()\n"
+         "                    passthroughCount.incrementAndGet()\n"
+         "                    true\n"
+         "                } catch (e: IOException) {\n"
+         "                    Log.e(TAG, \"write failed (IOException)\", e)\n"
+         "                    false\n"
+         "                } catch (t: Throwable) {\n"
+         "                    Log.e(TAG, \"write failed (Throwable)\", t)\n"
+         "                    false\n"
+         "                }\n"
+         "                if (!writeOk) break\n"
+         "            }\n"
+         "        } catch (t: Throwable) {}\n"
+         "    }\n"
+         "    private fun per1000Breadcrumb() {\n"
+         "        Log.d(TAG, \"startReaderThread: MTU=1400, \" +\n"
+         "            \"passthroughCount=${passthroughCount.get()}, \" +\n"
+         "            \"passthroughGap=${packetsObserved.get() - passthroughCount.get()}\")\n"
+         "    }\n"
+         "}\n",
+     ), []),
     # S88 case (Sprint 11.0Q - new) - active_pool_screen
     # .dart has 2-level VPN disconnect fallback (.stop
     # with 3s timeout + MainActivity.disconnectVpn) AND

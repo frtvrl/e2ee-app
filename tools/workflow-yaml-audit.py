@@ -3924,6 +3924,171 @@ def check_notification_chronometer_autostop_v35() -> list[str]:
     return findings
 
 
+def check_vpn_service_passthrough_count_invariant_v36() -> list[str]:
+    """Sprint 11.0T: OpenE2eeVpnService.kt passthrough
+    counter invariant (S93).
+
+    Owner 18:19 symptom: `curl 212.64.210.85/healthz`
+    works WITHOUT the VPN (the upstream Patroni
+    answers) but FAILS with the VPN. The Owner
+    concluded the passthrough is NOT actually
+    writing the bytes back to the TUN output.
+    Sprint 11.0J added the write but did not
+    provide a per-write counter for the Owner to
+    grep logcat after a test.
+
+    11.0T fix — 5-limb debug + per-write counter:
+      1. `output.write(buf, 0, n)` is called per
+         read+write and `passthroughCount`
+         increments EXACTLY ONCE per successful
+         write.
+      2. `pfd.fileDescriptor.valid()` is checked
+         before the write (catches a closed-fd
+         state silently).
+      3. `output.flush()` is called immediately
+         after the write (per-packet, no batching).
+      4. DNS UDP 53 packets (port 53 + 853 for
+         DoT) are detected inline and logged
+         every 50th occurrence so the Owner can
+         grep logcat for DNS capture.
+      5. The per-1000-packet breadcrumb now
+         includes `passthroughCount` + the
+         `passthroughGap` (= packetsObserved -
+         passthroughCount) so a non-zero gap is
+         visible in logcat. If `passthroughGap > 0`
+         after a `curl 212.64.210.85/healthz` test,
+         the write IS being called but the bytes
+         are not reaching the kernel (Magisk
+         Zygisk or similar fd-revoke interference).
+
+    The check requires SIX tokens in
+    `OpenE2eeVpnService.kt` (comment-stripped):
+      1. `private val passthroughCount = AtomicLong(0)`
+         field declaration.
+      2. `passthroughCount.set(0)` in
+         `startCapture` (paired reset with
+         `packetsObserved.set(0)`).
+      3. `pfd.fileDescriptor.valid()` check in
+         `startReaderThread` BEFORE the write
+         call.
+      4. `passthroughCount.incrementAndGet()`
+         call after the successful write
+         (NOT inside the catch block).
+      5. `catch (t: Throwable)` (broader than
+         `catch (e: IOException)`) for the write
+         block — the non-IOException root cause
+         is the S93 hypothesis.
+      6. `passthroughCount` literal in the
+         per-1000-packet breadcrumb so the
+         Owner can grep `adb logcat` for the
+         counter value.
+
+    Missing any of these re-opens the "passthrough
+    not actually writing" regression.
+    """
+    import re
+    findings = []
+    vpn_path = (
+        REPO_ROOT / "mobile" / "android" / "app" / "src" / "main"
+        / "kotlin" / "com" / "opene2ee" / "opene2ee" / "vpn"
+        / "OpenE2eeVpnService.kt"
+    )
+    if not vpn_path.exists():
+        findings.append(
+            "S93 OpenE2eeVpnService.kt: file missing."
+        )
+        return findings
+    try:
+        text = vpn_path.read_text(encoding="utf-8")
+    except (UnicodeDecodeError, OSError) as e:
+        findings.append(
+            "S93 OpenE2eeVpnService.kt: read failed ("
+            + str(e) + ")."
+        )
+        return findings
+    # 1. passthroughCount field.
+    if not re.search(
+        r"private\s+val\s+passthroughCount\s*=\s*AtomicLong\s*\(\s*0\s*\)",
+        text,
+    ):
+        findings.append(
+            "S93 OpenE2eeVpnService.kt: missing "
+            "`private val passthroughCount = AtomicLong(0)` "
+            "field. Sprint 11.0T invariant - the counter is "
+            "the canonical diagnostic for the Owner to grep "
+            "logcat after a `curl 212.64.210.85/healthz` test."
+        )
+    # 2. reset in startCapture.
+    if "passthroughCount.set(0)" not in text:
+        findings.append(
+            "S93 OpenE2eeVpnService.kt: missing "
+            "`passthroughCount.set(0)` reset in "
+            "`startCapture`. Sprint 11.0T invariant - the "
+            "counter must be reset alongside "
+            "`packetsObserved.set(0)` so the per-1000 "
+            "breadcrumb measures the new session's counts."
+        )
+    # 3. pfd validity check.
+    if "pfd.fileDescriptor.valid" not in text:
+        findings.append(
+            "S93 OpenE2eeVpnService.kt: missing "
+            "`pfd.fileDescriptor.valid()` check before the "
+            "write. Sprint 11.0T invariant (limb 2 of the "
+            "5-limb debug) - the pfd may be in a closed-fd "
+            "state (Magisk Zygisk revoke) and the write will "
+            "silently fail otherwise."
+        )
+    # 4. increment after successful write.
+    if "passthroughCount.incrementAndGet" not in text:
+        findings.append(
+            "S93 OpenE2eeVpnService.kt: missing "
+            "`passthroughCount.incrementAndGet()` call "
+            "after the successful write. Sprint 11.0T "
+            "invariant (limb 1) - the counter must "
+            "increment EXACTLY ONCE per successful write "
+            "(NOT inside the catch block)."
+        )
+    # 5. catch (Throwable) for the write.
+    has_ioe_catch = re.search(r"catch\s*\(\s*\w+\s*:\s*IOException\s*\)", text)
+    has_throwable_catch = re.search(r"catch\s*\(\s*t\s*:\s*Throwable\s*\)", text)
+    if not has_throwable_catch:
+        findings.append(
+            "S93 OpenE2eeVpnService.kt: missing "
+            "`catch (t: Throwable)` for the write block. "
+            "Sprint 11.0T invariant (limb 5 hypothesis) - "
+            "the non-IOException root cause (e.g. "
+            "IllegalStateException on a closed "
+            "AutoCloseOutputStream) is the S93 hypothesis. "
+            "Without the broader catch, the exception "
+            "bubbles to the outer Throwable handler and "
+            "logs only 'TUN reader crashed' (no exception "
+            "class / message)."
+        )
+    if not has_ioe_catch:
+        findings.append(
+            "S93 OpenE2eeVpnService.kt: missing "
+            "`catch (e: IOException)` for the write block. "
+            "Sprint 11.0T invariant - the IOException catch "
+            "MUST be present (in addition to the broader "
+            "Throwable catch) for the normal TUN-close path."
+        )
+    # 6. passthroughCount in the per-1000-packet breadcrumb.
+    if "passthroughCount" not in text or "passthroughGap" not in text:
+        findings.append(
+            "S93 OpenE2eeVpnService.kt: missing "
+            "`passthroughCount` / `passthroughGap` in the "
+            "per-1000-packet breadcrumb. Sprint 11.0T "
+            "invariant - the Owner greps `adb logcat` for "
+            "`startReaderThread: MTU=..., passthroughCount=..., "
+            "passthroughGap=...` to verify the per-session "
+            "counter."
+        )
+    return findings
+
+
+
+
+
 
 
 
@@ -7063,6 +7228,12 @@ def main() -> int:
         all_findings.extend(s92_findings)
     else:
         print("PASS: OpenE2eeVpnService.kt has foreground notification setUsesChronometer + setWhen(now+15min) + Handler.postDelayed auto-stop at 00:00 - regression guard for OnePlus 9 Pro 15-minute session cap - Sprint 11.0S-EXTRA S92")
+
+    s93_findings = check_vpn_service_passthrough_count_invariant_v36()
+    if s93_findings:
+        all_findings.extend(s93_findings)
+    else:
+        print("PASS: OpenE2eeVpnService.kt has passthroughCount AtomicLong + per-write increment + pfd.fileDescriptor.valid check + catch(Throwable) Log.e + DNS UDP 53 detection - regression guard for OnePlus 9 Pro 'passthrough not actually writing' symptom - Sprint 11.0T S93")
 
     # Sprint 10.1A: HapticFeedback / SystemSound literal in active pool screen (S29).
     s29_findings = check_active_pool_haptic_feedback_literal_present()

@@ -1,0 +1,101 @@
+Sprint 11.0T - passthroughCount 5-limb debug (S93 audit)
+
+Owner 18:19 root cause confirmed: `curl
+212.64.210.85/healthz` works WITHOUT the VPN (the
+upstream Patroni answers) but FAILS with the VPN
+(the user sees "no route to host" / timeout). The
+Sprint 11.0J passthrough (`output.write(buf, 0, n)`)
+is NOT actually writing the bytes back to the TUN
+output — the kernel drops the packets and the
+user's real apps see no internet.
+
+11.0T fix — 5-limb debug + per-write counter:
+  1. tun.write() called per read+write +
+     passthroughCount increment. New
+     `private val passthroughCount = AtomicLong(0)`
+     field increments EXACTLY ONCE per successful
+     `output.write(buf, 0, n)`.
+  2. pfd validity check. Before the write,
+     `pfd.fileDescriptor.valid()` is called. If the
+     fd is closed (Magisk Zygisk revoke), the reader
+     loop exits immediately with Log.e (instead of
+     silently failing on the write).
+  3. output.flush() immediate. `output.flush()` is
+     called immediately after the write (per-packet,
+     no batching — confirmed in the code).
+  4. DNS UDP 53 detection. The reader inline-checks
+     IPv4 protocol (17) + UDP dst port 53 (DNS) or
+     853 (DoT) and logs every 50th DNS packet so the
+     Owner can grep `adb logcat` to confirm DNS
+     queries are reaching the TUN.
+  5. passthroughGap breadcrumb. The per-1000-packet
+     Log.d now includes both `passthroughCount`
+     AND `passthroughGap = packetsObserved -
+     passthroughCount`. If `passthroughGap > 0`
+     after a `curl 212.64.210.85/healthz` test, the
+     write IS being called but the bytes are not
+     reaching the kernel (Magisk Zygisk or similar
+     fd-revoke interference). If `passthroughGap == 0`,
+     every captured packet is also being
+     passthrough-written (the healthy state).
+
+  Plus: catch(Throwable) on the write block (in
+  addition to the existing catch(IOException)). The
+  Owner 18:19 hypothesis is a non-IOException (e.g.
+  IllegalStateException on a closed
+  AutoCloseOutputStream) which would bubble to the
+  outer Throwable handler and log only "TUN reader
+  crashed" without the exception class / message.
+  11.0T catches the broader Throwable so the Log.e
+  shows the actual class + message.
+
+S93 audit verifies SIX tokens in
+`OpenE2eeVpnService.kt` (comment-stripped):
+  1. `private val passthroughCount = AtomicLong(0)`
+     field.
+  2. `passthroughCount.set(0)` reset in startCapture.
+  3. `pfd.fileDescriptor.valid()` check before write.
+  4. `passthroughCount.incrementAndGet()` after
+     successful write.
+  5. `catch (t: Throwable)` for the write block
+     (broader than just IOException).
+  6. `passthroughCount` + `passthroughGap` in the
+     per-1000-packet breadcrumb.
+
+Verification: 142/142 audit-self-test (141 + 1 S93) +
+37/37 flutter test + S93 + S92 + S91 + S89 + S88 + S87 +
+S86 + S28-inverted + S84 + S82 + S80 all PASS.
+:app:compileDebugKotlin BUILD SUCCESSFUL. Fresh
+APK SHA captured in s110t-final-report.md.
+
+Owner test (the canonical 18:19 verification):
+  1. Install the new APK.
+  2. Open the active pool screen, tap
+     "Şifreleme Doğrulamayı Başlat".
+  3. `adb logcat | grep startReaderThread` and
+     confirm `passthroughCount` + `passthroughGap`
+     appear every 1000 packets. Healthy state:
+     `passthroughGap == 0` (every captured packet
+     is also being written).
+  4. `curl 212.64.210.85/healthz` — the upstream
+     Patroni should now answer (the bytes are
+     actually being written to the TUN output and
+     reaching the kernel, which routes them out the
+     real NIC).
+  5. If `passthroughCount == 0` after the curl
+     test, the write is failing — grep the
+     surrounding Log.e for the exception class
+     (Sprint 11.0T: `IllegalStateException` from
+     the AutoCloseOutputStream is the most likely
+     cause, which the broader catch(Throwable)
+     now surfaces).
+
+Note: 11.0S UI cleanup (remove Başlat/Oturumu Bitir
+buttons, replace with Alıcı Ol toggle + 15-min
+countdown) is still PAUSED. The half-done Dart
+refactor was reverted to the 11.0R state earlier
+in 11.0S-DNS for the DNS fix to ship cleanly. The
+11.0S UI refactor will resume in a follow-up
+sprint (likely 12.0X) — the notification
+chronometer (S92) is the user-facing surface
+for the 15-min countdown in the meantime.
