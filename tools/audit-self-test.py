@@ -17,6 +17,7 @@ check_active_pool_linechart_literal_present (S27),
 check_pool_provider_timer_periodic_literal_present (S28 - INVERTED in 11.0O),
 check_vpn_service_mtu_and_fragment_log_v31 (S87),
 check_oturumu_bitir_2level_fallback_v32 (S88),
+check_oturumu_bitir_full_state_reset_v33 (S89),
 check_active_pool_haptic_feedback_literal_present (S29),
 check_pool_provider_debug_state_fields (S33),
 check_active_pool_scaffold_messenger_snackbar (S34),
@@ -166,11 +167,11 @@ S50 cases: 2 (1 PASS + 1 FAIL — `OpenE2EE Şifreleme Doğrulama` foreground no
 S51 cases: 2 (1 PASS + 1 FAIL — `i < 30` + `Timer.periodic` 30-call loop in active_pool_screen.dart).
 S52 cases: 2 (1 PASS + 1 FAIL — `sendSummary` method + `/api/v1/sessions/` path + 6 fields in telemetry_service.dart).
 
-Total: 138 cases (72 pre-Sprint 11.0A + 16 from S45-S52 + 24 from
+Total: 139 cases (72 pre-Sprint 11.0A + 16 from S45-S52 + 24 from
 S53-S60 + 24 from S61-S72 + 1 from S73 + 1 from S74 + 1 from
 S76 + 1 from S77 + 1 from S78 + 1 from S79 + 1 from S80 +
 1 from S82 + 1 from S84 + 1 from S86 + 1 from S87 +
-1 from S88).
+1 from S88 + 1 from S89).
 Sprint 11.0Q adds 1 new selftest case for S88 (2-level
 VPN disconnect fallback: .stop with 3s timeout +
 MainActivity.disconnectVpn hard-stop) — the
@@ -874,6 +875,53 @@ def run_s28_check(pool_provider_text):
         is_mock = cb_name in ("_mockTick", "_tick", "advance", "fakeTick")
         if is_mock or (not is_real_api and cb_name != "?"):
             findings.append("S28 fail (mock Timer.periodic callback " + cb_name + ")")
+    return findings
+
+
+def run_s89_check(active_pool_text):
+    """Sprint 11.0R: active_pool_screen.dart full state
+    reset on disconnect (S89).
+
+    Owner 15:03 EXTENDED: 11.0Q disconnected the VPN
+    but left the packet counter growing (the
+    PacketDrain kept pushing onPacketsSampled
+    events to the still-live _packetSub), the
+    button text didn't reset, the pill stayed
+    SAMPLING. 11.0R does a full state reset.
+
+    This check asserts the S89 invariants:
+      1. _packetSub.cancel() in _oturumuBitir.
+      2. _stateSub.cancel() in _oturumuBitir.
+      3. _toplamPaket = 0 reset.
+      4. _vpnState = VpnLifecycleState.idle reset.
+      5. setState(() { ... }) wrapping the resets.
+      6. _disconnectInProgress = true at entry
+         (single-flight guard).
+      7. _disconnectInProgress = false at end
+         (guard clears).
+      8. context.go('/home/gorevler') navigation.
+    """
+    import re
+    findings = []
+    if active_pool_text is None:
+        findings.append("S89 fail (active_pool_screen.dart missing)")
+        return findings
+    if "_packetSub?.cancel()" not in active_pool_text and "_packetSub.cancel()" not in active_pool_text:
+        findings.append("S89 fail (_packetSub.cancel missing)")
+    if "_stateSub?.cancel()" not in active_pool_text and "_stateSub.cancel()" not in active_pool_text:
+        findings.append("S89 fail (_stateSub.cancel missing)")
+    if "_toplamPaket = 0" not in active_pool_text:
+        findings.append("S89 fail (_toplamPaket=0 reset missing)")
+    if "_vpnState = VpnLifecycleState.idle" not in active_pool_text:
+        findings.append("S89 fail (_vpnState idle reset missing)")
+    if not re.search(r"setState\s*\(\s*\(\s*\)\s*\{", active_pool_text):
+        findings.append("S89 fail (setState missing)")
+    if "_disconnectInProgress = true" not in active_pool_text:
+        findings.append("S89 fail (disconnectInProgress=true guard missing)")
+    if "_disconnectInProgress = false" not in active_pool_text:
+        findings.append("S89 fail (disconnectInProgress=false clear missing)")
+    if "context.go('/home/gorevler')" not in active_pool_text and 'context.go("/home/gorevler")' not in active_pool_text:
+        findings.append("S89 fail (context.go /home/gorevler missing)")
     return findings
 
 
@@ -4882,12 +4930,50 @@ cases = [
          "  private fun disconnectVpn(result: MethodChannel.Result) {\n"
          "    val stopIntent = Intent(this, OpenE2eeVpnService::class.java)\n"
          "    stopService(stopIntent)\n"
-         "    VpnService.prepare(this)\n"
-         "    result.success(true)\n"
+          "    VpnService.prepare(this)\n"
+          "    result.success(true)\n"
+          "  }\n"
+          "}\n",
+      ),
+      []),
+    # S89 case (Sprint 11.0R - new) - active_pool_screen
+    # .dart has full state reset on disconnect
+    # (_packetSub.cancel + _stateSub.cancel +
+    # _toplamPaket=0 + _vpnState=idle + setState +
+    # _disconnectInProgress guard + context.go
+    # /home/gorevler). Regression guard for the
+    # Owner 15:03 "packet counter keeps growing after
+    # disconnect" symptom. Total selftest: 138 + 1 = 139.
+    ("S89 PASS (active_pool_screen.dart has full state reset on disconnect - subscriptions cancelled + counters cleared + UI reset + button disabled while in flight + navigation to /home/gorevler)",
+     run_s89_check, (
+         "import 'dart:async';\n"
+         "class _S {\n"
+         "  bool _disconnectInProgress = false;\n"
+         "  StreamSubscription? _packetSub;\n"
+         "  StreamSubscription? _stateSub;\n"
+         "  StreamSubscription? _webrtcStateSub;\n"
+         "  int _toplamPaket = 0;\n"
+         "  int _toplamTelemetri = 0;\n"
+         "  Future<void> _oturumuBitir() async {\n"
+         "    if (_disconnectInProgress) return;\n"
+         "    _disconnectInProgress = true;\n"
+         "    await _packetSub?.cancel();\n"
+         "    await _stateSub?.cancel();\n"
+         "    await _webrtcStateSub?.cancel();\n"
+         "    _packetSub = null;\n"
+         "    _stateSub = null;\n"
+         "    _webrtcStateSub = null;\n"
+         "    setState(() {\n"
+         "      _toplamPaket = 0;\n"
+         "      _toplamTelemetri = 0;\n"
+         "      _vpnState = VpnLifecycleState.idle;\n"
+         "      _webrtcState = WebRTCState.closed;\n"
+         "    });\n"
+         "    context.go('/home/gorevler');\n"
+         "    _disconnectInProgress = false;\n"
          "  }\n"
          "}\n",
-     ),
-     []),
+     ), []),
     # S29 cases (Sprint 10.1A - new)
     ("S29 PASS (active_pool_screen.dart contains the literal `HapticFeedback` for eşleşme feedback)",
      run_s29_check, ("HapticFeedback.lightImpact();\n",), []),

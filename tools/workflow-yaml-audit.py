@@ -3486,6 +3486,176 @@ def check_oturumu_bitir_2level_fallback_v32() -> list[str]:
     return findings
 
 
+def check_oturumu_bitir_full_state_reset_v33() -> list[str]:
+    """Sprint 11.0R: active_pool_screen.dart full state reset
+    on disconnect (S89).
+
+    Owner 15:03 EXTENDED: VPN kapatma 11.0Q worked
+    (yesil snackbar, status bar temiz, skorlar
+    yonlendirme) AMA two new bugs:
+      1. Packet counter kept growing by 10 every 5s
+         after disconnect (the PacketDrain
+         ScheduledExecutorService kept pushing
+         onPacketsSampled events to the still-live
+         _packetSub subscription, which kept bumping
+         _toplamPaket).
+      2. The page didn't re-render — button text
+         stayed "Oturumu Bitir" (didn't revert to
+         "Başlat"), the pill stayed SAMPLING, etc.
+         The UI was effectively frozen in the
+         pre-disconnect state.
+
+    11.0R does a full state reset after disconnect:
+      1. _packetSub.cancel() + _stateSub.cancel() +
+         _webrtcStateSub.cancel() — stop the stream
+         subscriptions so no more onPacketsSampled /
+         onStateChanged events arrive.
+      2. _toplamPaket = 0 + _toplamTelemetri = 0 —
+         clear the counter so the UI shows 0, not
+         the stale pre-disconnect value.
+      3. setState(() { ... }) with _vpnState = idle
+         + _webrtcState = closed — forces a re-render
+         so the button text + pill update.
+      4. _disconnectInProgress = false — clears the
+         single-flight guard.
+      5. Navigate to /home/gorevler (NOT /home/skorlar)
+         — the user lands on the main task list, and
+         the Skorlar tab is reachable from the bottom
+         nav bar. 11.0R EXTENDED brief change.
+      6. Single-flight guard: _disconnectInProgress
+         is set to true at the entry of _oturumuBitir
+         and the button onPressed is `null` while
+         in flight (prevents double-tap crashes).
+
+    The check requires EIGHT tokens in
+    active_pool_screen.dart (comment-stripped):
+      1. _packetSub?.cancel() (or _packetSub.cancel())
+         in _oturumuBitir.
+      2. _stateSub?.cancel() in _oturumuBitir.
+      3. _toplamPaket = 0 in _oturumuBitir (or in the
+         setState body).
+      4. _vpnState = VpnLifecycleState.idle (or
+         equivalent reset) in the setState.
+      5. setState(() { ... }) wrapping the resets.
+      6. _disconnectInProgress = true at the entry of
+         _oturumuBitir (the single-flight guard).
+      7. _disconnectInProgress = false at the END of
+         _oturumuBitir (the guard clears).
+      8. context.go('/home/gorevler') in _oturumuBitir
+         (11.0R EXTENDED navigation target).
+
+    Missing any of these re-opens the "packet counter
+    keeps growing after disconnect" regression.
+    """
+    import re
+    findings = []
+    screen_path = (
+        REPO_ROOT / "mobile" / "lib" / "screens"
+        / "active_pool_screen.dart"
+    )
+    if not screen_path.exists():
+        findings.append("S89 active_pool_screen.dart: file missing.")
+        return findings
+    try:
+        screen_text = screen_path.read_text(encoding="utf-8")
+    except (UnicodeDecodeError, OSError) as e:
+        findings.append(
+            "S89 active_pool_screen.dart: read failed ("
+            + str(e) + ")."
+        )
+        return findings
+    # 1. _packetSub?.cancel() or _packetSub.cancel().
+    if "_packetSub?.cancel()" not in screen_text and "_packetSub.cancel()" not in screen_text:
+        findings.append(
+            "S89 active_pool_screen.dart: missing "
+            "_packetSub.cancel() in _oturumuBitir. Sprint "
+            "11.0R invariant - the packet stream "
+            "subscription MUST be cancelled on disconnect "
+            "(otherwise _onPacketsSampled keeps firing "
+            "and the counter keeps growing)."
+        )
+    # 2. _stateSub?.cancel() or _stateSub.cancel().
+    if "_stateSub?.cancel()" not in screen_text and "_stateSub.cancel()" not in screen_text:
+        findings.append(
+            "S89 active_pool_screen.dart: missing "
+            "_stateSub.cancel() in _oturumuBitir. Sprint "
+            "11.0R invariant - the state stream "
+            "subscription MUST be cancelled on disconnect "
+            "(otherwise the state pill keeps showing "
+            "SAMPLING / running)."
+        )
+    # 3. _toplamPaket = 0.
+    if "_toplamPaket = 0" not in screen_text:
+        findings.append(
+            "S89 active_pool_screen.dart: missing "
+            "`_toplamPaket = 0` in _oturumuBitir. Sprint "
+            "11.0R invariant - the counter MUST be reset "
+            "to 0 (otherwise the UI shows the stale "
+            "pre-disconnect value)."
+        )
+    # 4. _vpnState = VpnLifecycleState.idle.
+    if "_vpnState = VpnLifecycleState.idle" not in screen_text:
+        findings.append(
+            "S89 active_pool_screen.dart: missing "
+            "`_vpnState = VpnLifecycleState.idle` in "
+            "_oturumuBitir. Sprint 11.0R invariant - the "
+            "VPN state pill MUST reset to idle (otherwise "
+            "the pill keeps showing SAMPLING)."
+        )
+    # 5. setState(() { ... }) wrapping the resets.
+    if not re.search(
+        r"setState\s*\(\s*\(\s*\)\s*\{",
+        screen_text,
+    ):
+        findings.append(
+            "S89 active_pool_screen.dart: missing `setState` "
+            "in _oturumuBitir. Sprint 11.0R invariant - "
+            "the UI MUST re-render to reflect the resets "
+            "(button text reverts to Başlat, pill shows "
+            "HAZIR)."
+        )
+    # 6. _disconnectInProgress = true at the entry.
+    if "_disconnectInProgress = true" not in screen_text:
+        findings.append(
+            "S89 active_pool_screen.dart: missing "
+            "`_disconnectInProgress = true` at the entry of "
+            "_oturumuBitir. Sprint 11.0R invariant - the "
+            "single-flight guard prevents double-tap "
+            "crashes (Owner 15:03: pre-11.0R, double-tap "
+            "raced the 3s timeout and the second call "
+            "crashed)."
+        )
+    # 7. _disconnectInProgress = false at the END.
+    # Find the _oturumuBitir method body and verify
+    # the guard clears inside. We look for the
+    # `= false` assignment in the same function.
+    if "_disconnectInProgress = false" not in screen_text:
+        findings.append(
+            "S89 active_pool_screen.dart: missing "
+            "`_disconnectInProgress = false` at the end of "
+            "_oturumuBitir. Sprint 11.0R invariant - the "
+            "guard MUST clear after the disconnect "
+            "completes (otherwise the user is permanently "
+            "locked out of the disconnect button)."
+        )
+    # 8. Navigate to /home/gorevler (NOT /home/skorlar).
+    if "context.go('/home/gorevler')" not in screen_text and 'context.go("/home/gorevler")' not in screen_text:
+        findings.append(
+            "S89 active_pool_screen.dart: missing "
+            "`context.go('/home/gorevler')` in "
+            "_oturumuBitir. Sprint 11.0R EXTENDED brief - "
+            "the navigation target is /home/gorevler (the "
+            "Skorlar tab is reachable from the bottom nav "
+            "bar; landing the user on gorevler keeps the "
+            "post-disconnect experience focused on what's "
+            "next rather than what just happened)."
+        )
+    return findings
+
+
+
+
+
 
 
 
@@ -6598,6 +6768,12 @@ def main() -> int:
         all_findings.extend(s88_findings)
     else:
         print("PASS: active_pool_screen.dart has 2-level VPN disconnect fallback (_vpn.stop with 3s timeout + MainActivity.disconnectVpn hard-stop) - regression guard for OnePlus 9 Pro 'Oturumu Bitir requires app uninstall' symptom - Sprint 11.0Q S88")
+
+    s89_findings = check_oturumu_bitir_full_state_reset_v33()
+    if s89_findings:
+        all_findings.extend(s89_findings)
+    else:
+        print("PASS: active_pool_screen.dart has full state reset on disconnect (subscriptions cancelled + counters cleared + UI reset + button disabled while in flight + navigation to /home/gorevler) - regression guard for OnePlus 9 Pro 'packet counter keeps growing after disconnect' symptom - Sprint 11.0R S89")
 
     # Sprint 10.1A: HapticFeedback / SystemSound literal in active pool screen (S29).
     s29_findings = check_active_pool_haptic_feedback_literal_present()

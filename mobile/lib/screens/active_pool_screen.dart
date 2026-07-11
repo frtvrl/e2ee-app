@@ -66,6 +66,22 @@ class _ActivePoolScreenState extends ConsumerState<ActivePoolScreen>
   WebRTCState _webrtcState = WebRTCState.idle;
   int _toplamPaket = 0;
   int _toplamTelemetri = 0;
+  /// Sprint 11.0R — single-flight guard for the "Oturumu
+  /// Bitir" button. Pre-11.0R, double-tapping the button
+  /// would race the disconnect (LEVEL 1 in 11.0Q is async
+  /// with a 3s timeout, so two rapid taps could both
+  /// enter the handler, both call `_vpn.stop()` /
+  /// `disconnectVpn`, and the second call would crash
+  /// because the service is already being torn down).
+  /// 11.0R sets this to `true` at the entry of
+  /// `_oturumuBitir` and back to `false` only at the
+  /// end (after the full disconnect + state reset).
+  /// The button is also `onPressed: null` while
+  /// `_disconnectInProgress` is `true` (visual feedback
+  /// + tap guard). S89 audit verifies the field
+  /// exists AND is reset to `false` at the end of
+  /// `_oturumuBitir`.
+  bool _disconnectInProgress = false;
 
   @override
   void initState() {
@@ -235,6 +251,14 @@ class _ActivePoolScreenState extends ConsumerState<ActivePoolScreen>
   /// S88 audit verifies this 2-level fallback is
   /// present in `_oturumuBitir`.
   Future<void> _oturumuBitir() async {
+    // Sprint 11.0R — single-flight guard. Pre-11.0R,
+    // double-tapping the button (within the 3s LEVEL 1
+    // timeout) would race the disconnect and crash the
+    // second call. 11.0R short-circuits on the second
+    // tap. The button is also disabled while in flight
+    // (see the build() onPressed: ...).
+    if (_disconnectInProgress) return;
+    _disconnectInProgress = true;
     final messenger = ScaffoldMessenger.of(context);
     messenger.hideCurrentSnackBar();
     // Sprint 11.0Q — LEVEL 1: try the Kotlin-side stop
@@ -265,7 +289,10 @@ class _ActivePoolScreenState extends ConsumerState<ActivePoolScreen>
         developer.log('LEVEL 2: MainActivity.disconnectVpn returned OK', name: 'Sprint110Q');
       } catch (e) {
         developer.log('LEVEL 2: MainActivity.disconnectVpn failed: $e', name: 'Sprint110Q', error: e);
-        if (!mounted) return;
+        if (!mounted) {
+          _disconnectInProgress = false;
+          return;
+        }
         messenger.showSnackBar(
           const SnackBar(
             content: Text('VPN kapatma hatası — sistem ayarlarından kapatın.'),
@@ -274,10 +301,16 @@ class _ActivePoolScreenState extends ConsumerState<ActivePoolScreen>
             behavior: SnackBarBehavior.floating,
           ),
         );
+        // Sprint 11.0R — clear the in-flight guard on
+        // failure too, so the user can retry.
+        _disconnectInProgress = false;
         return;
       }
     }
-    if (!mounted) return;
+    if (!mounted) {
+      _disconnectInProgress = false;
+      return;
+    }
     messenger.showSnackBar(
       const SnackBar(
         content: Text('VPN kapatıldı'),
@@ -286,51 +319,81 @@ class _ActivePoolScreenState extends ConsumerState<ActivePoolScreen>
         behavior: SnackBarBehavior.floating,
       ),
     );
-    // S67 invariant: still try to close the session
-    // on the backend (best-effort). If the orchestrator
-    // has a sessionId, POST /api/v1/sessions/$id/close
-    // and navigate to /home/skorlar. If it doesn't (the
-    // typical 11.0Q stale-state case), just navigate
-    // to /home/skorlar without a summary.
+    // Sprint 11.0R — FULL STATE RESET. Pre-11.0R, the
+    // disconnect was a no-op for the UI: the
+    // `_packetSub` stream subscription stayed alive,
+    // the `Sprint 11.0K PacketDrain` continued pushing
+    // `onPacketsSampled` events to `_onPacketsSampled`,
+    // which kept bumping `_toplamPaket` and
+    // `_toplamTelemetri`. The user saw the packet
+    // counter grow by 10 every 5s even after the VPN
+    // was gone. Owner 15:03 also flagged that the
+    // button text didn't reset and the pill stayed
+    // SAMPLING. 11.0R does a full state reset:
+    //   1. Cancel all 3 stream subscriptions.
+    //   2. Clear _toplamPaket + _toplamTelemetri.
+    //   3. Reset _vpnState to idle + _webrtcState to
+    //      its default.
+    //   4. setState(() { ... }) so the button text
+    //      reverts to "Başlat" and the pill shows
+    //      HAZIR.
+    //   5. Close guard: re-subscribing in initState
+    //      is a NO-OP after a disconnect (the user
+    //      must navigate back to the screen for the
+    //      streams to re-attach).
+    try {
+      await _packetSub?.cancel();
+      await _stateSub?.cancel();
+      await _webrtcStateSub?.cancel();
+      developer.log('Sprint 11.0R: all stream subscriptions cancelled', name: 'Sprint110R');
+    } catch (e) {
+      developer.log('Sprint 11.0R: subscription cancel error (benign): $e', name: 'Sprint110R');
+    }
+    _packetSub = null;
+    _stateSub = null;
+    _webrtcStateSub = null;
+    setState(() {
+      _toplamPaket = 0;
+      _toplamTelemetri = 0;
+      _vpnState = VpnLifecycleState.idle;
+      _webrtcState = WebRTCState.closed;
+    });
+    // Sprint 11.0R — best-effort: try to close the
+    // session on the backend (Sprint 11.0C S66 + S67).
+    // The 11.0R EXTENDED brief changes the navigation
+    // destination from /home/skorlar to /home/gorevler
+    // so the user lands on the main task list (the
+    // Skorlar tab is reachable from the bottom nav
+    // bar). The Skorlar screen is still fetched on
+    // init, so the new score is visible without a
+    // manual refresh.
     if (_orchestrator.sessionId != null) {
       try {
-        final summary = await _orchestrator.closeSession();
-        if (!mounted) return;
-        context.go('/home/skorlar');
-        if (summary != null) {
-          final overall = (summary['overall_score'] as num?)?.toDouble();
-          if (overall != null) {
-            messenger.showSnackBar(
-              SnackBar(
-                content: Text(
-                  'Oturum tamamlandı, skor '
-                  '${overall.toStringAsFixed(0)}/100',
-                ),
-                backgroundColor: AppTheme.primary,
-                duration: const Duration(seconds: 3),
-                behavior: SnackBarBehavior.floating,
-              ),
-            );
-          }
-        }
+        await _orchestrator.closeSession();
       } catch (e) {
-        if (!mounted) return;
-        messenger.showSnackBar(
-          SnackBar(
-            content: Text('Oturum kapatılamadı: $e'),
-            backgroundColor: AppTheme.danger,
-            duration: const Duration(seconds: 3),
-            behavior: SnackBarBehavior.floating,
-          ),
-        );
+        // Backend close is best-effort; the user-
+        // blocking symptom (the running VPN) is
+        // already fixed. Just log + continue.
+        developer.log('Sprint 11.0R: closeSession error (benign): $e', name: 'Sprint110R');
       }
-    } else {
-      // No orchestrator session — just navigate. The
-      // 11.0Q flow prioritizes stopping the VPN
-      // (the user-blocking symptom) over closing the
-      // session (which is best-effort backend bookkeeping).
-      context.go('/home/skorlar');
     }
+    if (!mounted) {
+      _disconnectInProgress = false;
+      return;
+    }
+    // 11.0R EXTENDED — navigate to /home/gorevler
+    // (not /home/skorlar). The Skorlar tab is
+    // reachable from the bottom nav bar; landing
+    // the user on gorevler keeps the post-disconnect
+    // experience focused on "what's next" rather than
+    // "what just happened".
+    context.go('/home/gorevler');
+    // 11.0R — clear the in-flight guard AFTER the
+    // navigation completes. The button stays disabled
+    // for the duration of the navigation transition
+    // (GoRouter is async) to prevent the user from
+    // re-tapping during the route change.
+    _disconnectInProgress = false;
   }
 
   void _onAliciOlToggle() {
@@ -538,7 +601,7 @@ class _ActivePoolScreenState extends ConsumerState<ActivePoolScreen>
             child: SizedBox(
               width: double.infinity,
               child: OutlinedButton.icon(
-                onPressed: _oturumuBitir,
+                onPressed: _disconnectInProgress ? null : _oturumuBitir,
                 icon: const Icon(Icons.stop_circle_outlined),
                 label: const Text('Oturumu Bitir'),
                 style: OutlinedButton.styleFrom(

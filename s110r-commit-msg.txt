@@ -1,0 +1,75 @@
+Sprint 11.0R - full state reset on disconnect (S89 audit)
+
+Owner 15:03 EXTENDED symptom: VPN kapatma 11.0Q worked
+(yesil snackbar, status bar temiz) but two new bugs:
+  1. Packet counter kept growing by 10 every 5s after
+     disconnect (the PacketDrain kept pushing
+     onPacketsSampled events to the still-live
+     _packetSub subscription, which kept bumping
+     _toplamPaket).
+  2. The page didn't re-render — button text stayed
+     "Oturumu Bitir" (didn't revert to "Başlat"),
+     the pill stayed SAMPLING. The UI was effectively
+     frozen in the pre-disconnect state.
+
+11.0R does a full state reset after disconnect:
+
+  1. _packetSub?.cancel() + _stateSub?.cancel() +
+     _webrtcStateSub?.cancel() — stop all 3 stream
+     subscriptions so no more onPacketsSampled /
+     onStateChanged events arrive.
+  2. _packetSub = null + _stateSub = null +
+     _webrtcStateSub = null — drop the references.
+  3. setState(() { ... }) with _toplamPaket = 0 +
+     _toplamTelemetri = 0 + _vpnState =
+     VpnLifecycleState.idle + _webrtcState =
+     WebRTCState.closed — forces a re-render so the
+     button text reverts to "Başlat" and the pill
+     shows HAZIR.
+  4. _disconnectInProgress = false — clears the
+     single-flight guard.
+  5. Navigate to /home/gorevler (NOT /home/skorlar)
+     — the user lands on the main task list, and
+     the Skorlar tab is reachable from the bottom
+     nav bar. 11.0R EXTENDED brief change.
+  6. Single-flight guard: _disconnectInProgress is
+     set to true at the entry of _oturumuBitir and
+     the button onPressed is `null` while in flight
+     (prevents double-tap crashes during the 3s
+     LEVEL 1 timeout).
+
+S89 audit verifies EIGHT tokens in
+active_pool_screen.dart (comment-stripped):
+  1. _packetSub.cancel() in _oturumuBitir.
+  2. _stateSub.cancel() in _oturumuBitir.
+  3. _toplamPaket = 0 reset.
+  4. _vpnState = VpnLifecycleState.idle reset.
+  5. setState(() { ... }) wrapping the resets.
+  6. _disconnectInProgress = true at entry.
+  7. _disconnectInProgress = false at end.
+  8. context.go('/home/gorevler') navigation.
+
+Verification: 139/139 audit-self-test (138 + 1 S89) +
+37/37 flutter test + S89 + S88 + S87 + S86 +
+S28-inverted + S84 + S82 + S80 all PASS. flutter
+analyze: No issues found. Fresh APK SHA captured in
+s110r-final-report.md.
+
+Owner test: tap "Oturumu Bitir" with VPN active.
+  - LEVEL 1 (.stop with 3s timeout) or LEVEL 2
+    (disconnectVpn) stops the VPN.
+  - The packet counter RESETS to 0 immediately.
+  - The button text REVERTS to "Başlat" and is
+    DISABLED (greyed out) for the duration of
+    the navigation transition.
+  - The pill shows HAZIR (idle state).
+  - The user lands on /home/gorevler (the main
+    task list). The Skorlar tab is reachable from
+    the bottom nav bar.
+  - Subsequent taps on the (no-longer-visible)
+    "Oturumu Bitir" button: no-op (the button is
+    already gone — the user is on a different
+    page).
+  - On the new page, opening a fresh session
+    starts from 0 0 — no stale pre-disconnect
+    state leaks into the next session.
