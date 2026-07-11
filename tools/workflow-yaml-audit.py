@@ -4973,6 +4973,125 @@ def check_vpn_service_state_transition_breadcrumbs_v22() -> list[str]:
     return findings
 
 
+def check_vpn_service_addroute_bad_address_v23() -> list[str]:
+    """Sprint 11.0I: OpenE2eeVpnService.kt has correct addRoute (S79).
+
+    Regression guard for the OnePlus 9 Pro
+    `IllegalArgumentException: Bad address` crash
+    (Owner 11:46-11:57 logcat, PID 23863 / 23865).
+    Pre-11.0I, `buildVpnBuilder` used
+    `.addAddress(TUN_ADDRESS, 24)` + `.addRoute(TUN_ADDRESS, 24)` —
+    the SAME IP for both the interface address AND the captured
+    route destination. Android's `VpnService.Builder.addRoute`
+    expects a DESTINATION SUBNET (the network whose traffic the
+    VPN will capture), NOT the interface address. The 9.7.0-era
+    mirror bug is tolerated on Pixel / Samsung but rejected by
+    OnePlus 9 Pro OxygenOS strict validation.
+
+    The Sprint 11.0I fix uses `.addRoute("0.0.0.0", 0)` — the
+    default route (ALL traffic) — and a separate prefix length
+    for the interface address (`.addAddress(TUN_ADDRESS, 24)`).
+
+    The check requires THREE tokens in `OpenE2eeVpnService.kt`
+    (comment-stripped):
+      1. `.addAddress(TUN_ADDRESS` literal present — proves
+         the interface address is set with the `TUN_ADDRESS`
+         constant.
+      2. `.addRoute("0.0.0.0", 0)` literal present — proves
+         the captured route is the default route (NOT the
+         interface address).
+      3. `.addRoute(TUN_ADDRESS` literal ABSENT — anti-pattern
+         guard. A regression that re-introduces the 9.7.0
+         mirror bug (same IP for both calls) is flagged.
+
+    Missing any of these re-opens the OnePlus `Bad address`
+    regression.
+    """
+    import re
+    findings = []
+    target = REPO_ROOT / "mobile" / "android" / "app" / "src" / "main" / \
+        "kotlin" / "com" / "opene2ee" / "opene2ee" / "vpn" / "OpenE2eeVpnService.kt"
+    if not target.exists():
+        findings.append(
+            "S79 OpenE2eeVpnService.kt: file missing. Sprint 11.0I "
+            "invariant — the service must use `.addRoute(\"0.0.0.0\", 0)` "
+            "(default route) and NOT `.addRoute(TUN_ADDRESS, 24)` "
+            "(the 9.7.0 mirror bug that OnePlus 9 Pro rejects)."
+        )
+        return findings
+    try:
+        text = target.read_text(encoding="utf-8")
+    except (UnicodeDecodeError, OSError) as e:
+        findings.append(
+            "S79 OpenE2eeVpnService.kt: read failed (" + str(e) + ")."
+        )
+        return findings
+    # Comment-strip (mirrors S43 / S73 / S74 / S75 / S78).
+    stripped = re.sub(r"/\*[\s\S]*?\*/", "", text)
+    code_lines = []
+    for ln in stripped.splitlines():
+        in_string = False
+        i = 0
+        cut_at = -1
+        while i < len(ln):
+            c = ln[i]
+            if c == '"':
+                in_string = not in_string
+                i += 1
+                continue
+            if c == "/" and i + 1 < len(ln) and ln[i + 1] == "/" and not in_string:
+                cut_at = i
+                break
+            i += 1
+        if cut_at >= 0:
+            code_lines.append(ln[:cut_at])
+        else:
+            code_lines.append(ln)
+    code = "\n".join(code_lines)
+    # 1. `.addAddress(TUN_ADDRESS` literal.
+    if ".addAddress(TUN_ADDRESS" not in code:
+        findings.append(
+            "S79 OpenE2eeVpnService.kt: missing `.addAddress(TUN_ADDRESS` "
+            "literal. Sprint 11.0I invariant — the interface address "
+            "MUST be set with the `TUN_ADDRESS` constant. The "
+            "associated prefix length is `TUN_PREFIX_LENGTH` (24)."
+        )
+    # 2. `.addRoute("0.0.0.0", 0)` literal OR the constant form
+    #    `addRoute(CAPTURED_ROUTE_ADDRESS, CAPTURED_ROUTE_PREFIX)`
+    #    (which the production code uses — the constants are
+    #    defined as `const val CAPTURED_ROUTE_ADDRESS = "0.0.0.0"`
+    #    and `const val CAPTURED_ROUTE_PREFIX = 0`).
+    has_literal = re.search(r"\.addRoute\(\s*\"0\.0\.0\.0\"\s*,\s*0\s*\)", code)
+    has_constant = (
+        "CAPTURED_ROUTE_ADDRESS" in code and
+        "CAPTURED_ROUTE_PREFIX" in code
+    )
+    if not (has_literal or has_constant):
+        findings.append(
+            "S79 OpenE2eeVpnService.kt: missing the default-route "
+            "addRoute (`.addRoute(\"0.0.0.0\", 0)` literal OR the "
+            "`addRoute(CAPTURED_ROUTE_ADDRESS, CAPTURED_ROUTE_PREFIX)` "
+            "constant form). Sprint 11.0I invariant — the captured "
+            "route MUST be the default route (`0.0.0.0/0` = ALL "
+            "traffic). Pre-11.0I the code used `.addRoute(TUN_ADDRESS, "
+            "24)` which is the 9.7.0 mirror bug — OnePlus 9 Pro "
+            "rejects with `IllegalArgumentException: Bad address`."
+        )
+    # 3. `.addRoute(TUN_ADDRESS` ABSENT — anti-pattern guard.
+    if re.search(r"\.addRoute\(\s*TUN_ADDRESS", code):
+        findings.append(
+            "S79 OpenE2eeVpnService.kt: contains the "
+            "anti-pattern `.addRoute(TUN_ADDRESS, ...)` — the "
+            "9.7.0 mirror bug. Sprint 11.0I invariant — "
+            "`addRoute` takes a DESTINATION SUBNET, NOT the "
+            "interface address. Use `.addRoute(\"0.0.0.0\", 0)` "
+            "(default route) instead. OnePlus 9 Pro OxygenOS "
+            "rejects the mirror-bug form with `IllegalArgumentException: "
+            "Bad address`."
+        )
+    return findings
+
+
 # ═══ Sprint 11.0B — M2 production audit (S53-S60) ═══
 #
 # The M2 brief specifies `webrtc: ^0.13.0+` as the dep. The
@@ -5698,6 +5817,12 @@ def main() -> int:
         all_findings.extend(s78_findings)
     else:
         print("PASS: OpenE2eeVpnService.kt has state-transition Log.d breadcrumbs (startCapture/stopCapture/onRevoke) + synchronized TOCTOU guard - Sprint 11.0H S78")
+
+    s79_findings = check_vpn_service_addroute_bad_address_v23()
+    if s79_findings:
+        all_findings.extend(s79_findings)
+    else:
+        print("PASS: OpenE2eeVpnService.kt has correct addRoute (0.0.0.0/0 default route) — regression guard for OnePlus 9 Pro IllegalArgumentException: Bad address (Sprint 9.7.0 mirror bug) - Sprint 11.0I S79")
 
     if all_findings:
         print("\nFINDINGS:")

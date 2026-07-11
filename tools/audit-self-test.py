@@ -59,8 +59,9 @@ check_main_activity_owns_vpn_channel_v18 (S73),
 check_vpn_service_startforeground_within_5s_v19 (S74),
 check_vpn_service_log_d_breadcrumbs_v20 (S75),
 check_vpn_service_dart_singleton_v20 (S76),
-check_active_pool_screen_ui_propagation_v21 (S77), and
-check_vpn_service_state_transition_breadcrumbs_v22 (S78).
+check_active_pool_screen_ui_propagation_v21 (S77),
+check_vpn_service_state_transition_breadcrumbs_v22 (S78), and
+check_vpn_service_addroute_bad_address_v23 (S79).
 
 (Sprint 11.0F adds 2 new selftest cases for S75 + S76 —
 the OnePlus 9 Pro Senaryo D regression guards. S75
@@ -160,13 +161,14 @@ S50 cases: 2 (1 PASS + 1 FAIL — `OpenE2EE Şifreleme Doğrulama` foreground no
 S51 cases: 2 (1 PASS + 1 FAIL — `i < 30` + `Timer.periodic` 30-call loop in active_pool_screen.dart).
 S52 cases: 2 (1 PASS + 1 FAIL — `sendSummary` method + `/api/v1/sessions/` path + 6 fields in telemetry_service.dart).
 
-Total: 131 cases (72 pre-Sprint 11.0A + 16 from S45-S52 + 24 from
+Total: 132 cases (72 pre-Sprint 11.0A + 16 from S45-S52 + 24 from
 S53-S60 + 24 from S61-S72 + 1 from S73 + 1 from S74 + 1 from
-S76 + 1 from S77 + 1 from S78). Sprint 11.0H adds 1 new
-selftest case for S78 (state-transition breadcrumbs + TOCTOU
-guard) — the OnePlus 9 Pro `start -> DRAINING` regression
-guard. S75 remains a production-audit-only check (S58
-pattern).
+S76 + 1 from S77 + 1 from S78 + 1 from S79). Sprint 11.0I
+adds 1 new selftest case for S79 (VpnService.Builder.addRoute
+Bad address fix) — the OnePlus 9 Pro
+`IllegalArgumentException: Bad address` regression guard
+(9.7.0 mirror bug). S75 remains a production-audit-only
+check (S58 pattern).
 """
 import sys
 from pathlib import Path
@@ -2393,6 +2395,91 @@ def run_s78_check(opene2ee_vpn_service_text):
     return findings
 
 
+def run_s79_check(opene2ee_vpn_service_text):
+    """Sprint 11.0I: OpenE2eeVpnService.kt has correct addRoute (S79).
+
+    Regression guard for the OnePlus 9 Pro
+    `IllegalArgumentException: Bad address` crash
+    (Owner 11:46-11:57 logcat). Pre-11.0I, `buildVpnBuilder`
+    used `.addAddress(TUN_ADDRESS, 24)` +
+    `.addRoute(TUN_ADDRESS, 24)` — the SAME IP for both
+    the interface address AND the captured route
+    destination. Android's `VpnService.Builder.addRoute`
+    expects a DESTINATION SUBNET, NOT the interface
+    address. OnePlus 9 Pro OxygenOS strict validation
+    rejects the mirror-bug form with
+    `IllegalArgumentException: Bad address` (Pixel / Samsung
+    tolerate the bug; OnePlus does not).
+
+    The Sprint 11.0I fix uses `.addRoute("0.0.0.0", 0)` —
+    the default route (ALL traffic).
+
+    The check requires THREE tokens in `OpenE2eeVpnService.kt`
+    (comment-stripped):
+      1. `.addAddress(TUN_ADDRESS` literal present.
+      2. `.addRoute("0.0.0.0", 0)` literal present.
+      3. `.addRoute(TUN_ADDRESS` literal ABSENT (anti-pattern
+         guard).
+    """
+    import re
+    findings = []
+    if opene2ee_vpn_service_text is None:
+        findings.append("S79 OpenE2eeVpnService.kt: file missing")
+        return findings
+    stripped = re.sub(r"/\*[\s\S]*?\*/", "", opene2ee_vpn_service_text)
+    code_lines = []
+    for ln in stripped.splitlines():
+        in_string = False
+        i = 0
+        cut_at = -1
+        while i < len(ln):
+            c = ln[i]
+            if c == '"':
+                in_string = not in_string
+                i += 1
+                continue
+            if c == "/" and i + 1 < len(ln) and ln[i + 1] == "/" and not in_string:
+                cut_at = i
+                break
+            i += 1
+        if cut_at >= 0:
+            code_lines.append(ln[:cut_at])
+        else:
+            code_lines.append(ln)
+    code = "\n".join(code_lines)
+    # 1. `.addAddress(TUN_ADDRESS` literal.
+    if ".addAddress(TUN_ADDRESS" not in code:
+        findings.append(
+            "S79 OpenE2eeVpnService.kt: missing `.addAddress(TUN_ADDRESS` "
+            "literal. Sprint 11.0I invariant — the interface address "
+            "MUST be set with the `TUN_ADDRESS` constant."
+        )
+    # 2. `.addRoute("0.0.0.0", 0)` literal OR the constant form.
+    has_literal = re.search(r"\.addRoute\(\s*\"0\.0\.0\.0\"\s*,\s*0\s*\)", code)
+    has_constant = (
+        "CAPTURED_ROUTE_ADDRESS" in code and
+        "CAPTURED_ROUTE_PREFIX" in code
+    )
+    if not (has_literal or has_constant):
+        findings.append(
+            "S79 OpenE2eeVpnService.kt: missing the default-route "
+            "addRoute (`.addRoute(\"0.0.0.0\", 0)` literal OR the "
+            "`addRoute(CAPTURED_ROUTE_ADDRESS, CAPTURED_ROUTE_PREFIX)` "
+            "constant form). Sprint 11.0I invariant — the captured "
+            "route MUST be the default route."
+        )
+    # 3. `.addRoute(TUN_ADDRESS` ABSENT (anti-pattern guard).
+    if re.search(r"\.addRoute\(\s*TUN_ADDRESS", code):
+        findings.append(
+            "S79 OpenE2eeVpnService.kt: contains the anti-pattern "
+            "`.addRoute(TUN_ADDRESS, ...)` — the 9.7.0 mirror bug. "
+            "Sprint 11.0I invariant — `addRoute` takes a DESTINATION "
+            "SUBNET, NOT the interface address. Use "
+            "`.addRoute(\"0.0.0.0\", 0)` (default route)."
+        )
+    return findings
+
+
 # ─── Test cases ──────────────────────────────────────────────────
 
 # Case 0: fully-valid file (post-Sprint 9.6.6 fix) — expect 0 findings.
@@ -3898,6 +3985,28 @@ case_s78_vpn_service_state_transitions_pass = (
     "}\n"
 )
 
+# S79 (Sprint 11.0I): OpenE2eeVpnService.kt has correct addRoute
+# (0.0.0.0/0 default route) and NO addRoute(TUN_ADDRESS, ...)
+# (the 9.7.0 mirror bug that OnePlus 9 Pro rejects with
+# `IllegalArgumentException: Bad address`). The PASS case
+# mirrors the post-11.0I production file: `addAddress(TUN_ADDRESS`
+# literal present, `.addRoute("0.0.0.0", 0)` literal present,
+# `.addRoute(TUN_ADDRESS` literal ABSENT.
+case_s79_vpn_service_addroute_pass = (
+    "package com.opene2ee.opene2ee.vpn\n"
+    "class OpenE2eeVpnService {\n"
+    "    protected fun buildVpnBuilder(): VpnService.Builder {\n"
+    "        return Builder()\n"
+    "            .setSession(\"OpenE2EE Network Diagnostic\")\n"
+    "            .addAddress(TUN_ADDRESS, 24)\n"
+    "            .addRoute(\"0.0.0.0\", 0)\n"
+    "            .addDnsServer(PRIMARY_DNS)\n"
+    "            .setMtu(1500)\n"
+    "            .setBlocking(true)\n"
+    "    }\n"
+    "}\n"
+)
+
 cases = [
     # S1-S5 cases (Sprint 9.6.6 — regression guard: must still pass)
     ("PASS (Sprint 9.6.6 fixed file)", run_check, (case_pass,), []),
@@ -4310,6 +4419,14 @@ cases = [
     # 130 + 1 = 131 (was 130 before Sprint 11.0H).
     ("S78 PASS (OpenE2eeVpnService.kt has state-transition Log.d breadcrumbs + synchronized(stateLock) TOCTOU guard — regression guard for OnePlus 9 Pro start->DRAINING race)",
      run_s78_check, (case_s78_vpn_service_state_transitions_pass,), []),
+    # S79 case (Sprint 11.0I - new) — OpenE2eeVpnService.kt
+    # has correct addRoute (0.0.0.0/0 default route) and
+    # NO addRoute(TUN_ADDRESS, ...) (the 9.7.0 mirror bug
+    # that OnePlus 9 Pro rejects with
+    # `IllegalArgumentException: Bad address`). Total
+    # selftest: 131 + 1 = 132 (was 131 before Sprint 11.0I).
+    ("S79 PASS (OpenE2eeVpnService.kt has correct addRoute (0.0.0.0/0) and NO addRoute(TUN_ADDRESS) anti-pattern — regression guard for OnePlus 9 Pro IllegalArgumentException: Bad address (Sprint 9.7.0 mirror bug))",
+     run_s79_check, (case_s79_vpn_service_addroute_pass,), []),
   ]   # noqa: E501
 
 failed = []

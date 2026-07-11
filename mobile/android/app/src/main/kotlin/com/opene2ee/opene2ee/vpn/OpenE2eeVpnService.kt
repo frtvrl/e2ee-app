@@ -229,6 +229,44 @@ class OpenE2eeVpnService : VpnService() {
         val TUN_ADDRESS: InetAddress = InetAddress.getByName("10.42.0.2")
         val TUN_ROUTED_CIDR: String = "10.42.0.0/24"
 
+        /**
+         * Sprint 11.0I — TUN interface address prefix length
+         * (`/24`). Used by [buildVpnBuilder] for the
+         * `addAddress(TUN_ADDRESS, TUN_PREFIX_LENGTH)` call
+         * (the interface address) AND logged in the
+         * startCapture breadcrumb.
+         */
+        const val TUN_PREFIX_LENGTH = 24
+
+        /**
+         * Sprint 11.0I — captured-route destination address
+         * (`"0.0.0.0"` = default route = ALL traffic). Used
+         * by [buildVpnBuilder] for the
+         * `addRoute(CAPTURED_ROUTE_ADDRESS, CAPTURED_ROUTE_PREFIX)`
+         * call.
+         *
+         * Why `0.0.0.0/0` and NOT `TUN_ADDRESS/24`:
+         * Pre-11.0I, the code used
+         * `.addRoute(TUN_ADDRESS, 24)` which is the SAME
+         * address as the interface (`addAddress(TUN_ADDRESS, 24)`).
+         * The Android `VpnService.Builder.addRoute` method
+         * expects a DESTINATION SUBNET (the network whose
+         * traffic the VPN will capture), NOT the interface
+         * address. Using the interface address is a
+         * 9.7.0-era mirror bug that the OnePlus 9 Pro
+         * OxygenOS strict validation rejects with
+         * `IllegalArgumentException: Bad address` (Owner
+         * 11:46-11:57 logcat confirmed the regression).
+         * Pixel/Samsung tolerate the bug; OnePlus does not.
+         *
+         * `0.0.0.0/0` (default route) is the safest
+         * fallback — it captures ALL traffic, works on every
+         * Android version (API 21+), and avoids the
+         * OnePlus strict validation.
+         */
+        const val CAPTURED_ROUTE_ADDRESS = "0.0.0.0"
+        const val CAPTURED_ROUTE_PREFIX = 0
+
         /** Notification channel ID (Android 8+ requirement). */
         const val NOTIFICATION_CHANNEL_ID = "opene2ee.vpn.diagnostic"
 
@@ -754,8 +792,23 @@ class OpenE2eeVpnService : VpnService() {
     protected open fun buildVpnBuilder(): VpnService.Builder {
         val b = Builder()
             .setSession("OpenE2EE Network Diagnostic")
-            .addAddress(TUN_ADDRESS, 24)
-            .addRoute(TUN_ADDRESS, 24)
+            // Sprint 11.0I — `addAddress(TUN_ADDRESS, 24)` is the
+            // TUN INTERFACE address (the IP the VPN endpoint
+            // will hold on the device). The `/24` prefix length
+            // is the SUBNET size of that interface.
+            .addAddress(TUN_ADDRESS, TUN_PREFIX_LENGTH)
+            // Sprint 11.0I — `addRoute` takes a DESTINATION
+            // SUBNET, NOT the interface address. Pre-11.0I the
+            // code used `.addRoute(TUN_ADDRESS, 24)` (the SAME
+            // IP as the interface) which is the 9.7.0 mirror
+            // bug. OnePlus 9 Pro OxygenOS strict validation
+            // rejects it with `IllegalArgumentException: Bad
+            // address` (Owner 11:46-11:57 logcat confirmed
+            // the regression). The fix is `addRoute("0.0.0.0",
+            // 0)` — default route = ALL traffic captured.
+            // S79 audit invariant: this line MUST NOT regress
+            // to `addRoute(TUN_ADDRESS, ...)`.
+            .addRoute(CAPTURED_ROUTE_ADDRESS, CAPTURED_ROUTE_PREFIX)
             .addDnsServer(PRIMARY_DNS)
             .addDnsServer(SECONDARY_DNS)
             .setMtu(TUN_MTU)
@@ -816,7 +869,18 @@ class OpenE2eeVpnService : VpnService() {
             Log.d(TAG, "startCapture: entry (running=false, prevState=$prevState)")
             try {
                 val builder = buildVpnBuilder()
-                Log.d(TAG, "startCapture: buildVpnBuilder returned (addAddress=${TUN_ADDRESS.hostAddress}, mtu=$TUN_MTU)")
+                // Sprint 11.0I — extended breadcrumb so the
+                // addAddress / addRoute / MTU / DNS parameters
+                // are visible in `adb logcat -d -s OpenE2eeVpn:V`.
+                // Pre-11.0I the breadcrumb only logged the
+                // interface address, which made the OnePlus
+                // `Bad address` regression hard to diagnose
+                // (the actual culprit was the addRoute
+                // destination subnet).
+                Log.d(TAG, "startCapture: buildVpnBuilder returned " +
+                        "(addAddress=${TUN_ADDRESS.hostAddress}/$TUN_PREFIX_LENGTH, " +
+                        "addRoute=$CAPTURED_ROUTE_ADDRESS/$CAPTURED_ROUTE_PREFIX, " +
+                        "mtu=$TUN_MTU, dns=${PRIMARY_DNS.hostAddress}/${SECONDARY_DNS.hostAddress})")
                 val pfd = builder.establish()
                 if (pfd == null) {
                     // Sprint 11.0F — make the error message actionable.
