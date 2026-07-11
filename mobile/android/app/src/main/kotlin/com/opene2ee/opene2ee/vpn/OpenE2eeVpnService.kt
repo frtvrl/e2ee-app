@@ -1019,6 +1019,24 @@ class OpenE2eeVpnService : VpnService() {
                         "(addAddress=${TUN_ADDRESS.hostAddress}/$TUN_PREFIX_LENGTH, " +
                         "addRoute=$CAPTURED_ROUTE_ADDRESS/$CAPTURED_ROUTE_PREFIX, " +
                         "mtu=$TUN_MTU, dns=${PRIMARY_DNS.hostAddress}/${SECONDARY_DNS.hostAddress})")
+                // Sprint 11.0Y — call checkPrivateDnsAndBindToVpn
+                // BEFORE `Builder.establish()`. Owner 21:37 root
+                // cause: pre-11.0Y the call was AFTER establish()
+                // (at line ~1093). The VpnService.registered
+                // transport is only added to the system network
+                // registry AFTER establish() returns, but
+                // requestNetwork(TRANSPORT_VPN) was issued AFTER
+                // establish() and so the request was "satisfied"
+                // before the system saw a pending subscriber — the
+                // callback NEVER fired (not in 5s, not in 1 minute).
+                // By issuing requestNetwork(TRANSPORT_VPN) BEFORE
+                // establish(), the system has a pending subscriber
+                // for the VPN transport and fires onAvailable
+                // immediately when establish() registers it.
+                // The tablet is NOT rooted, so Magisk/DenyList is
+                // ruled out — the root cause is the call ordering
+                // bug. S98 audit verifies this invariant.
+                checkPrivateDnsAndBindToVpn()
                 val pfd = builder.establish()
                 if (pfd == null) {
                     // Sprint 11.0F — make the error message actionable.
@@ -1090,7 +1108,10 @@ class OpenE2eeVpnService : VpnService() {
                 // warning and shows a snackbar:
                 // "Ozel DNS kapali olmali - Ayarlar > Ag
                 // ve internet > Ozel DNS > Kapali".
-                checkPrivateDnsAndBindToVpn()
+                // Sprint 11.0Y — checkPrivateDnsAndBindToVpn
+                // is now called BEFORE Builder.establish()
+                // (see the call at line ~1049 above). The
+                // duplicate call here is removed.
                 packetsObserved.set(0)
                 // Sprint 11.0P — reset fragment counter
                 // alongside packetsObserved so the per-1000
@@ -1558,8 +1579,22 @@ class OpenE2eeVpnService : VpnService() {
             //       fail (so the Owner + Mavis can see
             //       the root cause in logcat).
             val callbackFired = java.util.concurrent.atomic.AtomicBoolean(false)
+            // Sprint 11.0Y — fallback attempt counter
+            // (max 1 retry = 2 total attempts). Wrapped
+            // in IntArray so the lambda can mutate the
+            // captured local var (Kotlin lambda capture
+            // rules for `var`).
+            val fallbackAttemptCount = intArrayOf(0)
             val fallbackHandler = Handler(Looper.getMainLooper())
-            val fallbackRunnable = Runnable {
+            // Sprint 11.0Y — `lateinit var` (not `val`)
+            // so the Runnable body can reference
+            // `fallbackRunnable` for the 5s retry. With
+            // `val` the compiler treats the self-reference
+            // as a forward reference (UNRESOLVED REFERENCE
+            // at the .postDelayed(fallbackRunnable, 5_000L)
+            // call site). lateinit var breaks the cycle.
+            lateinit var fallbackRunnable: Runnable
+            fallbackRunnable = Runnable {
                 if (!callbackFired.get()) {
                     Log.d(TAG, "DNS: NetworkCallback TIMEOUT (5s) - attempting activeNetwork fallback")
                     try {
@@ -1573,10 +1608,35 @@ class OpenE2eeVpnService : VpnService() {
                                     Log.e(TAG, "DNS: FALLBACK bind returned false. Check Magisk DenyList (Settings > Magisk > DenyList - ensure opene2ee is NOT in the list).")
                                 }
                             } else {
-                                Log.e(TAG, "DNS: FALLBACK activeNetwork has NO TRANSPORT_VPN. VPN profile not established. Check: (1) Magisk DenyList - opene2ee must NOT be in the list; (2) OnePlus OxygenOS Battery optimization - exclude opene2ee; (3) Android 14 foreground service type - confirm the foreground service is running.")
+                                // Sprint 11.0Y — VPN transport not
+                                // yet in the system network list
+                                // (Builder.establish() is still
+                                // running OR just completed but
+                                // the registration is async). The
+                                // brief: "ayrica activeNetwork
+                                // fallback hasTransport(TRANSPORT_VPN)
+                                // false donecek cunku VPN henuz
+                                // network listesinde yok, o zaman
+                                // 5s postDelayed ikinci deneme".
+                                // Schedule a second 5s attempt.
+                                // Max 2 attempts (1 initial + 1
+                                // retry) to avoid infinite loop.
+                                if (fallbackAttemptCount[0] < 1) {
+                                    fallbackAttemptCount[0]++
+                                    Log.d(TAG, "DNS: FALLBACK activeNetwork has NO TRANSPORT_VPN yet (attempt 1/2) - retrying in 5s")
+                                    fallbackHandler.postDelayed(fallbackRunnable, 5_000L)
+                                } else {
+                                    Log.e(TAG, "DNS: FALLBACK exhausted after 2 attempts. activeNetwork has NO TRANSPORT_VPN. Owner troubleshooting: (1) confirm VPN toggle is ON in system Settings; (2) Magisk DenyList - opene2ee must NOT be in the list; (3) OnePlus OxygenOS Battery optimization - exclude opene2ee; (4) Android 14 foreground service type - confirm foreground service is running; (5) reboot device to reset VPN subsystem.")
+                                }
                             }
                         } else {
-                            Log.e(TAG, "DNS: FALLBACK activeNetwork is NULL. VPN profile not established. Owner troubleshooting: (1) Magisk DenyList: Settings > Magisk > DenyList - remove opene2ee if listed; (2) confirm VPN toggle is ON in system Settings; (3) reboot device to reset VPN subsystem.")
+                            if (fallbackAttemptCount[0] < 1) {
+                                fallbackAttemptCount[0]++
+                                Log.d(TAG, "DNS: FALLBACK activeNetwork is NULL (attempt 1/2) - retrying in 5s")
+                                fallbackHandler.postDelayed(fallbackRunnable, 5_000L)
+                            } else {
+                                Log.e(TAG, "DNS: FALLBACK exhausted after 2 attempts. activeNetwork is NULL. Owner troubleshooting: (1) Magisk DenyList: Settings > Magisk > DenyList - remove opene2ee if listed; (2) confirm VPN toggle is ON in system Settings; (3) reboot device to reset VPN subsystem.")
+                            }
                         }
                     } catch (e: Throwable) {
                         Log.e(TAG, "DNS: FALLBACK failed: ${e.message}")

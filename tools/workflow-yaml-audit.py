@@ -4486,6 +4486,158 @@ def check_check_private_dns_5s_fallback_invariant_v40() -> list[str]:
     return findings
 
 
+def check_check_private_dns_call_before_establish_invariant_v41() -> list[str]:
+    """Sprint 11.0Y: checkPrivateDnsAndBindToVpn is
+    called BEFORE Builder.establish() in startCapture
+    (S98).
+
+    Owner 21:37 root cause: pre-11.0Y the
+    `checkPrivateDnsAndBindToVpn()` call was at the
+    END of startCapture (AFTER `Builder.establish()`).
+    The VpnService.registered transport is only added
+    to the system network registry AFTER establish()
+    returns, but `requestNetwork(TRANSPORT_VPN)` was
+    issued AFTER establish() and so the request was
+    "satisfied" before the system saw a pending
+    subscriber - the NetworkCallback.onAvailable /
+    onUnavailable NEVER fired (not in 5s, not in
+    1 minute). The Owner confirmed the tablet is
+    NOT rooted, ruling out Magisk/DenyList as the
+    cause.
+
+    11.0Y fix: move the `checkPrivateDnsAndBindToVpn()`
+    call to BEFORE `Builder.establish()`. By issuing
+    `requestNetwork(TRANSPORT_VPN)` BEFORE establish(),
+    the system has a pending subscriber for the VPN
+    transport and fires onAvailable immediately when
+    establish() registers it.
+
+    Also: the 5s fallback now does a SECOND 5s retry
+    if `activeNetwork.hasTransport(TRANSPORT_VPN)`
+    returns false on the first attempt (because the
+    VPN registration is async and may not be in the
+    network list at exactly T+5s). Max 2 attempts
+    (1 initial + 1 retry).
+
+    The check requires:
+      a. `checkPrivateDnsAndBindToVpn()` call site
+         appears (textually) BEFORE
+         `builder.establish()` in startCapture.
+      b. `fallbackAttemptCount` (the retry counter)
+         is declared.
+      c. `attempt 1/2` (the retry log breadcrumb) is
+         present.
+      d. `lateinit var fallbackRunnable` (the
+         forward-reference workaround for the
+         self-referencing Runnable) is present.
+
+    Missing the call-ordering invariant re-opens the
+    Owner 21:37 "callback NEVER fires for 1 minute
+    on a non-rooted tablet" regression - the VPN
+    transport is registered but the request is
+    already "satisfied" before the system sees the
+    pending subscriber.
+    """
+    import re
+    findings = []
+    service_path = (
+        REPO_ROOT / "mobile" / "android" / "app" / "src"
+        / "main" / "kotlin" / "com" / "opene2ee" / "opene2ee"
+        / "vpn" / "OpenE2eeVpnService.kt"
+    )
+    if not service_path.exists():
+        findings.append(
+            "S98 OpenE2eeVpnService.kt: file missing."
+        )
+        return findings
+    try:
+        text = service_path.read_text(encoding="utf-8")
+    except (UnicodeDecodeError, OSError) as e:
+        findings.append(
+            "S98 OpenE2eeVpnService.kt: read failed ("
+            + str(e) + ")."
+        )
+        return findings
+    # Required token substrings.
+    if "fallbackAttemptCount" not in text:
+        findings.append(
+            "S98 OpenE2eeVpnService.kt: missing "
+            "`fallbackAttemptCount` declaration. "
+            "Sprint 11.0Y invariant - the 5s "
+            "fallback must support a second 5s retry "
+            "if `activeNetwork.hasTransport(TRANSPORT_VPN)` "
+            "is false on the first attempt (VPN "
+            "registration is async; max 2 attempts)."
+        )
+    if "attempt 1/2" not in text:
+        findings.append(
+            "S98 OpenE2eeVpnService.kt: missing "
+            "`attempt 1/2` retry breadcrumb. Sprint "
+            "11.0Y invariant - logcat must show "
+            "which attempt is in progress so the "
+            "Owner can confirm the retry path was "
+            "reached."
+        )
+    if "lateinit var fallbackRunnable" not in text:
+        findings.append(
+            "S98 OpenE2eeVpnService.kt: missing "
+            "`lateinit var fallbackRunnable` "
+            "declaration. Sprint 11.0Y invariant - "
+            "the Runnable body self-references "
+            "fallbackRunnable to re-post the 5s "
+            "retry; lateinit var breaks the "
+            "forward-reference cycle."
+        )
+    # Order check: find the call site
+    # `checkPrivateDnsAndBindToVpn()` (NOT the
+    # function definition `checkPrivateDnsAndBindToVpn()
+    # {`) and ensure it is BEFORE `builder.establish()`.
+    # Use `checkPrivateDnsAndBindToVpn()\n` (with
+    # newline) as the call-site marker; the function
+    # definition has `() {` (space + brace) before
+    # the newline, so it won't match.
+    call_site_pos = text.find("checkPrivateDnsAndBindToVpn()\n")
+    if call_site_pos == -1:
+        findings.append(
+            "S98 OpenE2eeVpnService.kt: call site "
+            "`checkPrivateDnsAndBindToVpn()` not found."
+        )
+        return findings
+    # Find `builder.establish()` call site.
+    establish_pos = text.find("builder.establish()", call_site_pos)
+    if establish_pos == -1:
+        findings.append(
+            "S98 OpenE2eeVpnService.kt: call site "
+            "`builder.establish()` not found AFTER "
+            "the checkPrivateDnsAndBindToVpn() call."
+        )
+        return findings
+    # Check ordering.
+    if call_site_pos > establish_pos:
+        call_line = text[:call_site_pos].count("\n") + 1
+        establish_line = text[:establish_pos].count("\n") + 1
+        findings.append(
+            "S98 OpenE2eeVpnService.kt: "
+            "`checkPrivateDnsAndBindToVpn()` call "
+            "site (line " + str(call_line) + ") is "
+            "AFTER `builder.establish()` (line "
+            + str(establish_line) + "). Sprint 11.0Y "
+            "invariant - the call MUST be issued "
+            "BEFORE establish() so the system has a "
+            "pending subscriber for the VPN transport "
+            "(regression guard for Owner 21:37 "
+            "'callback never fires for 1 minute on "
+            "non-rooted tablet' symptom). The VPN "
+            "transport is only added to the system "
+            "network registry AFTER establish() "
+            "returns, so issuing the request AFTER "
+            "establish() means there is no pending "
+            "subscriber and the callback is never "
+            "invoked."
+        )
+    return findings
+
+
 
 
 
@@ -7668,6 +7820,12 @@ def main() -> int:
         all_findings.extend(s97_findings)
     else:
         print("PASS: OpenE2eeVpnService.kt checkPrivateDnsAndBindToVpn has 5s activeNetwork fallback (callbackFired flag + Handler postDelayed + NetworkCallback TIMEOUT breadcrumb + FALLBACK bindProcessToNetwork activeNetwork + hasTransport TRANSPORT_VPN check + Magisk DenyList troubleshooting hint) - regression guard for Owner 21:08 'NetworkCallback never fires for 1 minute' symptom - Sprint 11.0X S97")
+
+    s98_findings = check_check_private_dns_call_before_establish_invariant_v41()
+    if s98_findings:
+        all_findings.extend(s98_findings)
+    else:
+        print("PASS: OpenE2eeVpnService.kt checkPrivateDnsAndBindToVpn is called BEFORE Builder.establish() in startCapture (requestNetwork(TRANSPORT_VPN) issued while VPN is being registered) - regression guard for Owner 21:37 'callback never fires for 1 minute on non-rooted tablet' symptom - Sprint 11.0Y S98")
 
     # Sprint 10.1A: HapticFeedback / SystemSound literal in active pool screen (S29).
     s29_findings = check_active_pool_haptic_feedback_literal_present()

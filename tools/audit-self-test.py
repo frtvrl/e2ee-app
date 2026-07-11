@@ -25,6 +25,7 @@ check_manifest_change_network_state_v37 (S94),
 check_stop_capture_ring_clear_invariant_v38 (S95),
 check_check_private_dns_bind_5_logd_invariant_v39 (S96),
 check_check_private_dns_5s_fallback_invariant_v40 (S97),
+check_check_private_dns_call_before_establish_invariant_v41 (S98),
 check_active_pool_haptic_feedback_literal_present (S29),
 check_pool_provider_debug_state_fields (S33),
 check_active_pool_scaffold_messenger_snackbar (S34),
@@ -174,13 +175,13 @@ S50 cases: 2 (1 PASS + 1 FAIL — `OpenE2EE Şifreleme Doğrulama` foreground no
 S51 cases: 2 (1 PASS + 1 FAIL — `i < 30` + `Timer.periodic` 30-call loop in active_pool_screen.dart).
 S52 cases: 2 (1 PASS + 1 FAIL — `sendSummary` method + `/api/v1/sessions/` path + 6 fields in telemetry_service.dart).
 
-Total: 147 cases (72 pre-Sprint 11.0A + 16 from S45-S52 + 24 from
+Total: 148 cases (72 pre-Sprint 11.0A + 16 from S45-S52 + 24 from
 S53-S60 + 24 from S61-S72 + 1 from S73 + 1 from S74 + 1 from
 S76 + 1 from S77 + 1 from S78 + 1 from S79 + 1 from S80 +
 1 from S82 + 1 from S84 + 1 from S86 + 1 from S87 +
 1 from S88 + 1 from S89 + 1 from S91 + 1 from S92 +
 1 from S93 + 1 from S94 + 1 from S95 + 1 from S96 +
-1 from S97).
+1 from S97 + 1 from S98).
 Sprint 11.0Q adds 1 new selftest case for S88 (2-level
 VPN disconnect fallback: .stop with 3s timeout +
 MainActivity.disconnectVpn hard-stop) — the
@@ -1073,6 +1074,73 @@ def run_s97_check(opene2ee_vpn_service_text):
                 "S97 fail (missing 5s fallback token `"
                 + token + "` for " + label + ")"
             )
+    return findings
+
+
+def run_s98_check(opene2ee_vpn_service_text):
+    """Sprint 11.0Y: checkPrivateDnsAndBindToVpn is
+    called BEFORE Builder.establish() in startCapture
+    (S98).
+
+    Owner 21:37 root cause: pre-11.0Y the call was
+    AFTER establish(). The VPN transport is only
+    added to the system network registry AFTER
+    establish() returns, so issuing
+    requestNetwork(TRANSPORT_VPN) AFTER establish()
+    means there is no pending subscriber and the
+    callback is never invoked.
+
+    This check asserts the S98 invariant on
+    OpenE2eeVpnService.kt: 4 token substrings are
+    present:
+      a. `fallbackAttemptCount` (the retry counter).
+      b. `attempt 1/2` (the retry log breadcrumb).
+      c. `lateinit var fallbackRunnable` (the
+         forward-reference workaround).
+      d. `checkPrivateDnsAndBindToVpn()` call site
+         appears BEFORE `builder.establish()` in
+         startCapture (textual order check).
+    """
+    findings = []
+    if opene2ee_vpn_service_text is None:
+        findings.append("S98 fail (OpenE2eeVpnService.kt text missing)")
+        return findings
+    if "fallbackAttemptCount" not in opene2ee_vpn_service_text:
+        findings.append("S98 fail (missing `fallbackAttemptCount` declaration for 5s retry)")
+    if "attempt 1/2" not in opene2ee_vpn_service_text:
+        findings.append("S98 fail (missing `attempt 1/2` retry breadcrumb)")
+    if "lateinit var fallbackRunnable" not in opene2ee_vpn_service_text:
+        findings.append("S98 fail (missing `lateinit var fallbackRunnable` for self-reference workaround)")
+    # Order check: find the call site
+    # `checkPrivateDnsAndBindToVpn()` (NOT the
+    # function definition `checkPrivateDnsAndBindToVpn()
+    # {`) and ensure it is BEFORE `builder.establish()`.
+    # Use `checkPrivateDnsAndBindToVpn()\n` (with
+    # newline) as the call-site marker; the function
+    # definition has `() {` (space + brace) before
+    # the newline, so it won't match.
+    call_site_pos = opene2ee_vpn_service_text.find(
+        "checkPrivateDnsAndBindToVpn()\n"
+    )
+    if call_site_pos == -1:
+        findings.append("S98 fail (call site `checkPrivateDnsAndBindToVpn()` not found)")
+        return findings
+    establish_pos = opene2ee_vpn_service_text.find(
+        "builder.establish()", call_site_pos
+    )
+    if establish_pos == -1:
+        findings.append("S98 fail (`builder.establish()` not found AFTER call site)")
+        return findings
+    if call_site_pos > establish_pos:
+        call_line = opene2ee_vpn_service_text[:call_site_pos].count("\n") + 1
+        establish_line = opene2ee_vpn_service_text[:establish_pos].count("\n") + 1
+        findings.append(
+            "S98 fail (call site at line "
+            + str(call_line)
+            + " is AFTER builder.establish() at line "
+            + str(establish_line)
+            + "; must be BEFORE)"
+        )
     return findings
 
 
@@ -5551,6 +5619,52 @@ cases = [
            "            })\n"
            "        } catch (e: Throwable) {\n"
            "            Log.w(TAG, \"DNS: checkPrivateDnsAndBindToVpn failed: ${e.message}\")\n"
+           "        }\n"
+           "    }\n"
+           "}\n",
+       ), []),
+      # S98 case (Sprint 11.0Y - new) - OpenE2eeVpnService
+      # .kt startCapture has checkPrivateDnsAndBindToVpn
+      # call site BEFORE Builder.establish() + the 5s
+      # fallback supports a second 5s retry (fallbackAttemptCount
+      # counter + attempt 1/2 breadcrumb + lateinit var
+      # fallbackRunnable for the self-reference). Regression
+      # guard for the Owner 21:37 'NetworkCallback never fires
+      # for 1 minute on non-rooted tablet' symptom (the call
+      # MUST be issued BEFORE establish() so the system has
+      # a pending subscriber for the VPN transport). Total
+      # selftest: 147 + 1 = 148.
+      ("S98 PASS (OpenE2eeVpnService.kt startCapture calls checkPrivateDnsAndBindToVpn BEFORE Builder.establish() + 5s fallback has 2nd retry - regression guard for OnePlus 9 Pro OxygenOS non-rooted tablet)",
+       run_s98_check, (
+           "package com.opene2ee.opene2ee.vpn\n"
+           "import android.net.VpnService\n"
+           "import android.os.Handler\n"
+           "import android.os.Looper\n"
+           "class OpenE2eeVpnService {\n"
+           "    private fun startCapture(): State {\n"
+           "        val builder = Builder()\n"
+           "            .addAddress(TUN_ADDRESS, TUN_PREFIX_LENGTH)\n"
+           "            .addRoute(CAPTURED_ROUTE_ADDRESS, CAPTURED_ROUTE_PREFIX)\n"
+           "            .addDnsServer(PRIMARY_DNS)\n"
+           "            .setMtu(TUN_MTU)\n"
+           "        // Sprint 11.0Y: call checkPrivateDnsAndBindToVpn\n"
+           "        // BEFORE Builder.establish() (call site must be\n"
+           "        // textually before establish() in startCapture).\n"
+           "        checkPrivateDnsAndBindToVpn()\n"
+           "        val pfd = builder.establish()\n"
+           "        if (pfd == null) return State.ERROR\n"
+           "        return State.SAMPLING\n"
+           "    }\n"
+           "    private fun checkPrivateDnsAndBindToVpn() {\n"
+           "        val fallbackAttemptCount = intArrayOf(0)\n"
+           "        val fallbackHandler = Handler(Looper.getMainLooper())\n"
+           "        lateinit var fallbackRunnable: Runnable\n"
+           "        fallbackRunnable = Runnable {\n"
+           "            if (fallbackAttemptCount[0] < 1) {\n"
+           "                fallbackAttemptCount[0]++\n"
+           "                Log.d(TAG, \"DNS: FALLBACK attempt 1/2 - retrying in 5s\")\n"
+           "                fallbackHandler.postDelayed(fallbackRunnable, 5_000L)\n"
+           "            }\n"
            "        }\n"
            "    }\n"
            "}\n",
