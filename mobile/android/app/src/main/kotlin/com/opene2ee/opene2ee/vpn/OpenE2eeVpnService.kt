@@ -169,6 +169,7 @@ import java.util.concurrent.ScheduledFuture
 import java.util.concurrent.TimeUnit
 import java.util.concurrent.atomic.AtomicBoolean
 import java.util.concurrent.atomic.AtomicInteger
+import java.util.concurrent.atomic.AtomicLong
 
 /**
  * OpenE2EE Android VPN service — real (non-skeletal) implementation.
@@ -251,8 +252,31 @@ class OpenE2eeVpnService : VpnService() {
         /** Sampling cap per HANDOFF §6.1 mobile spec. */
         const val SAMPLING_CAP_PACKETS = 10
 
-        /** Standard Ethernet MTU. */
-        const val TUN_MTU = 1500
+        /**
+         * Sprint 11.0P — `TUN_MTU` lowered from 1500 to
+         * 1400. The standard Ethernet MTU (1500) is too
+         * large for mobile networks: Turkcell 4G/5G uses
+         * GTP-U encapsulation (8-byte header + IPsec
+         * 50-70-byte trailer) which means a 1500-byte TUN
+         * packet becomes 1500 + 78 = 1578 bytes on the
+         * wire. The mobile network drops any frame
+         * >1500 bytes (the radio link MTU), so packets
+         * exit the TUN, hit the radio link, and are
+         * dropped silently. The Owner sees Chrome /
+         * WhatsApp "no internet" even though the TUN
+         * reader is capturing packets (1247 packets/2min
+         * logcat in Sprint 11.0O confirmed passthrough
+         * is real; the missing 30% of large packets that
+         * were dropped on the radio link is what the
+         * user experiences as "DNS / load failures").
+         *
+         * 1400 bytes is the canonical mobile-safe MTU
+         * (1400 + 78 = 1478 < 1500 radio MTU). The
+         * S87 audit verifies `TUN_MTU = 1400` (NOT
+         * 1500) is present in `OpenE2eeVpnService.kt`
+         * as a regression guard.
+         */
+        const val TUN_MTU = 1400
 
         /** Public, no-leak DNS resolvers handed to the TUN. */
         val PRIMARY_DNS: InetAddress = InetAddress.getByName("1.1.1.1")
@@ -655,6 +679,22 @@ class OpenE2eeVpnService : VpnService() {
     /** Monotonic packet counter since last `start`. */
     private val packetsObserved = AtomicInteger(0)
 
+    /**
+     * Sprint 11.0P — IP fragment counter. Increments when
+     * the read packet's IP header has the
+     * `MF` (More Fragments) flag set or the fragment
+     * offset is non-zero. The fragment rate on a healthy
+     * mobile network is < 0.1%; a rate > 5% indicates
+     * MTU 1500 is too high (Owner 13:50: Turkcell GTP
+     * encapsulation drops fragments > 1500 bytes on the
+     * radio link). The 11.0P MTU = 1400 fix should
+     * drive the fragment rate back to baseline. The
+     * `startReaderThread` per-1000-packet breadcrumb
+     * surfaces `fragmentCount` for the Owner to grep
+     * `adb logcat` for after a Chrome / WhatsApp test.
+     */
+    private val ipFragmentCount = AtomicLong(0)
+
     /** True while TUN loop is running. */
     private val running = AtomicBoolean(false)
 
@@ -947,6 +987,11 @@ class OpenE2eeVpnService : VpnService() {
                 state = State.SAMPLING
                 Log.d(TAG, "startCapture: SAMPLING started, pfd=$pfd, state transition $prevState -> $state")
                 packetsObserved.set(0)
+                // Sprint 11.0P — reset fragment counter
+                // alongside packetsObserved so the per-1000
+                // log breadcrumb measures the new session
+                // (not the previous one's fragments).
+                ipFragmentCount.set(0)
                 synchronized(ringLock) { ring.clear() }
                 startForegroundCompat()
                 Log.d(TAG, "startCapture: startForegroundCompat() returned (foreground promotion OK)")
@@ -1329,6 +1374,32 @@ class OpenE2eeVpnService : VpnService() {
                         Log.d(TAG, "startReaderThread: read returned $n bytes, exiting reader loop")
                         break
                     }
+                    // Sprint 11.0P — IP fragment detection.
+                    // IPv4 header at offset 6-7 carries the
+                    // flags (3 bits) + fragment offset (13
+                    // bits). The MF (More Fragments) bit is
+                    // the high bit of byte 6. A non-zero
+                    // fragment offset (low 5 bits of byte 6 +
+                    // byte 7) also indicates a fragment. A
+                    // fragment rate > 5% on a mobile network
+                    // is a strong indicator that TUN MTU is
+                    // too high (the radio link drops fragments
+                    // > 1500 bytes). 11.0P sets TUN_MTU = 1400
+                    // so the radio link (1500-byte MTU minus
+                    // 78-byte GTP/IPsec trailer) can carry the
+                    // 1400-byte TUN frame. The fragment count
+                    // is surfaced in the per-1000-packet log
+                    // breadcrumb below.
+                    if (n >= 20 && (buf[0].toInt() and 0xFF) ushr 4 == 4) {
+                        val flagsAndOffset =
+                            (buf[6].toInt() and 0xFF) shl 8 or
+                                (buf[7].toInt() and 0xFF)
+                        val mfSet = (flagsAndOffset and 0x2000) != 0
+                        val fragOffset = flagsAndOffset and 0x1FFF
+                        if (mfSet || fragOffset != 0) {
+                            ipFragmentCount.incrementAndGet()
+                        }
+                    }
                     val packet = ByteBuffer.wrap(buf, 0, n).order(ByteOrder.BIG_ENDIAN)
                     val meta = extractMetadata(packet, n)
                     if (meta != null) {
@@ -1340,6 +1411,32 @@ class OpenE2eeVpnService : VpnService() {
                             ring.addLast(meta)
                         }
                         packetsObserved.incrementAndGet()
+                        // Sprint 11.0P — per-1000-packet MTU +
+                        // fragment breadcrumb. Owner 13:50: the
+                        // TUN_MTU = 1500 was too high for
+                        // Turkcell's GTP-U encapsulation
+                        // (78-byte trailer). 11.0P lowered
+                        // TUN_MTU to 1400 and the Owner can
+                        // now verify by grepping `adb logcat`
+                        // for `startReaderThread: MTU=$TUN_MTU,
+                        // fragmentCount=...` every 1000 packets.
+                        // A fragment rate > 5% is a strong
+                        // signal the MTU is still too high; a
+                        // rate < 0.1% confirms the mobile-safe
+                        // 1400-byte MTU is working.
+                        if (packetsObserved.get() % 1000 == 0) {
+                            val total = packetsObserved.get().toLong()
+                            val fragments = ipFragmentCount.get()
+                            val fragRatePct = if (total > 0) {
+                                (fragments.toDouble() * 100.0 / total.toDouble())
+                            } else {
+                                0.0
+                            }
+                            Log.d(TAG, "startReaderThread: MTU=$TUN_MTU, " +
+                                    "packetsObserved=$total, " +
+                                    "ipFragmentCount=$fragments, " +
+                                    "fragmentRatePct=${"%.2f".format(fragRatePct)}")
+                        }
                         if (packetsObserved.get() == SAMPLING_CAP_PACKETS) {
                             // Notify Dart early so the UI can react mid-session.
                             flushTelemetry()

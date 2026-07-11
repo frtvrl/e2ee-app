@@ -15,6 +15,7 @@ check_no_vpn_string_in_sprint10_ui (S25),
 check_whatsapp_deeplink_literal_present (S26),
 check_active_pool_linechart_literal_present (S27),
 check_pool_provider_timer_periodic_literal_present (S28 - INVERTED in 11.0O),
+check_vpn_service_mtu_and_fragment_log_v31 (S87),
 check_active_pool_haptic_feedback_literal_present (S29),
 check_pool_provider_debug_state_fields (S33),
 check_active_pool_scaffold_messenger_snackbar (S34),
@@ -164,20 +165,16 @@ S50 cases: 2 (1 PASS + 1 FAIL — `OpenE2EE Şifreleme Doğrulama` foreground no
 S51 cases: 2 (1 PASS + 1 FAIL — `i < 30` + `Timer.periodic` 30-call loop in active_pool_screen.dart).
 S52 cases: 2 (1 PASS + 1 FAIL — `sendSummary` method + `/api/v1/sessions/` path + 6 fields in telemetry_service.dart).
 
-Total: 136 cases (72 pre-Sprint 11.0A + 16 from S45-S52 + 24 from
+Total: 137 cases (72 pre-Sprint 11.0A + 16 from S45-S52 + 24 from
 S53-S60 + 24 from S61-S72 + 1 from S73 + 1 from S74 + 1 from
 S76 + 1 from S77 + 1 from S78 + 1 from S79 + 1 from S80 +
-1 from S82 + 1 from S84 + 1 from S86).
-Sprint 11.0O adds 1 new selftest case for S86 (no fake UI
-animation — no mock Timer.periodic callback + no
-setInterval + no Future.delayed in active_pool_screen.dart /
-pool_provider.dart / state/*.dart; the screen MUST
-subscribe to _vpn.packetStream.listen AND _vpn.stateStream
-.listen) — the Owner 13:20 "numbers animate without VPN"
-regression guard. S28 was INVERTED in 11.0O (the Sprint
-10.1A mock ticker audit is now a no-mock-ticker audit;
-the existing 2 S28 selftest cases were re-flipped to
-match the new direction).
+1 from S82 + 1 from S84 + 1 from S86 + 1 from S87).
+Sprint 11.0P adds 1 new selftest case for S87 (MTU 1400
++ per-1000-packet fragment log breadcrumb) — the
+OnePlus 9 Pro / Turkcell 4G/5G GTP encapsulation MTU
+drop regression guard (Owner 13:50: 1247 packets
+confirmed passthrough, but MTU 1500 was the remaining
+issue).
 Sprint 11.0J adds 1 new selftest case for S80 (TUN
 passthrough — `output.write(buf, 0, n)` after
 `input.read(buf)`) — the OnePlus 9 Pro "VPN active,
@@ -874,6 +871,72 @@ def run_s28_check(pool_provider_text):
         is_mock = cb_name in ("_mockTick", "_tick", "advance", "fakeTick")
         if is_mock or (not is_real_api and cb_name != "?"):
             findings.append("S28 fail (mock Timer.periodic callback " + cb_name + ")")
+    return findings
+
+
+def run_s87_check(opene2ee_vpn_service_text):
+    """Sprint 11.0P: OpenE2eeVpnService.kt MTU + fragment log (S87).
+
+    Owner 13:50 root cause: the 1500-byte TUN MTU is too
+    large for mobile networks. Turkcell 4G/5G uses
+    GTP-U encapsulation (78-byte trailer) which means
+    a 1500-byte TUN frame becomes 1578 bytes on the
+    radio link, which gets dropped. 11.0P lowers
+    TUN_MTU to 1400 (1400 + 78 = 1478 < 1500 radio
+    MTU) and adds a per-1000-packet MTU+fragment log
+    breadcrumb for the Owner to verify with
+    `adb logcat`.
+
+    This check asserts the S87 invariants on a fixture
+    string (the OpenE2eeVpnService.kt source):
+      1. `TUN_MTU = 1400` literal present (NOT 1500).
+      2. `addDnsServer(1.1.1.1` (or `addDnsServer(
+         PRIMARY_DNS`) call present.
+      3. `ipFragmentCount` field declared.
+      4. Per-1000-packet `fragmentCount` /
+         `fragmentRatePct` log breadcrumb present.
+    """
+    import re
+    findings = []
+    if opene2ee_vpn_service_text is None:
+        findings.append("S87 fail (file missing)")
+        return findings
+    # Comment-strip.
+    stripped = re.sub(r"/\*[\s\S]*?\*/", "", opene2ee_vpn_service_text)
+    code_lines = []
+    for ln in stripped.splitlines():
+        in_string = False
+        i = 0
+        cut_at = -1
+        while i < len(ln):
+            c = ln[i]
+            if c == '"':
+                in_string = not in_string
+                i += 1
+                continue
+            if c == "/" and i + 1 < len(ln) and ln[i + 1] == "/" and not in_string:
+                cut_at = i
+                break
+            i += 1
+        if cut_at >= 0:
+            code_lines.append(ln[:cut_at])
+        else:
+            code_lines.append(ln)
+    code = "\n".join(code_lines)
+    if not re.search(r"TUN_MTU\s*=\s*1400", code):
+        findings.append("S87 fail (TUN_MTU=1400 missing)")
+    if re.search(r"TUN_MTU\s*=\s*1500", code):
+        findings.append("S87 fail (TUN_MTU=1500 anti-pattern)")
+    if not (
+        "addDnsServer(PRIMARY_DNS" in code
+        or "addDnsServer(1.1.1.1" in code
+        or "addDnsServer(8.8.8.8" in code
+    ):
+        findings.append("S87 fail (addDnsServer missing)")
+    if "ipFragmentCount" not in code:
+        findings.append("S87 fail (ipFragmentCount field missing)")
+    if "fragmentRatePct" not in code and "fragmentCount=" not in code:
+        findings.append("S87 fail (per-1000-packet fragment log missing)")
     return findings
 
 
@@ -4683,8 +4746,43 @@ cases = [
          "    super.initState();\n"
          "    _vpn = VpnService.instance;\n"
          "    _packetSub = _vpn.packetStream.listen(_onPacketsSampled);\n"
-         "    _stateSub = _vpn.stateStream.listen((s) { setState(() => _vpnState = s); });\n"
-         "  }\n"
+          "    _stateSub = _vpn.stateStream.listen((s) { setState(() => _vpnState = s); });\n"
+          "  }\n"
+          "}\n",
+      ), []),
+    # S87 case (Sprint 11.0P - new) - OpenE2eeVpnService.kt
+    # has TUN_MTU=1400 (mobile-safe, NOT 1500) +
+    # addDnsServer(1.1.1.1) + ipFragmentCount field +
+    # per-1000-packet fragment log breadcrumb. Regression
+    # guard for the OnePlus 9 Pro / Turkcell 4G/5G GTP
+    # encapsulation MTU drop (Owner 13:50: 1247 packets
+    # confirmed passthrough, MTU 1500 was the remaining
+    # issue). Total selftest: 136 + 1 = 137.
+    ("S87 PASS (OpenE2eeVpnService.kt has TUN_MTU=1400 + addDnsServer(1.1.1.1) + ipFragmentCount + per-1000-packet fragment log - regression guard for OnePlus 9 Pro / Turkcell 4G GTP encapsulation MTU drop)",
+     run_s87_check, (
+         "package com.opene2ee.opene2ee.vpn\n"
+         "import java.util.concurrent.atomic.AtomicLong\n"
+         "class OpenE2eeVpnService {\n"
+         "    private val ipFragmentCount = AtomicLong(0)\n"
+         "    companion object {\n"
+         "        const val TUN_MTU = 1400\n"
+         "        val PRIMARY_DNS = java.net.InetAddress.getByName(\"1.1.1.1\")\n"
+         "    }\n"
+         "    private fun startReaderThread() {\n"
+         "        while (true) {\n"
+         "            val n = 100\n"
+         "            packetsObserved.incrementAndGet()\n"
+         "            if (packetsObserved.get() % 1000 == 0) {\n"
+         "                Log.d(TAG, \"startReaderThread: MTU=$TUN_MTU, \" +\n"
+         "                        \"ipFragmentCount=${ipFragmentCount.get()}, \" +\n"
+         "                        \"fragmentRatePct=0.0\")\n"
+         "            }\n"
+         "        }\n"
+         "    }\n"
+         "    private fun buildVpnBuilder(b: android.net.VpnService.Builder) {\n"
+         "        b.addDnsServer(PRIMARY_DNS)\n"
+         "        b.setMtu(TUN_MTU)\n"
+         "    }\n"
          "}\n",
      ), []),
     # S29 cases (Sprint 10.1A - new)

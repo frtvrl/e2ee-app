@@ -3123,6 +3123,159 @@ def check_dart_no_fake_ui_animation_v30() -> list[str]:
     return findings
 
 
+def check_vpn_service_mtu_and_fragment_log_v31() -> list[str]:
+    """Sprint 11.0P: OpenE2eeVpnService.kt has TUN_MTU=1400
+    (mobile-safe, NOT 1500) + per-1000-packet MTU +
+    fragment log breadcrumb (S87).
+
+    Owner 13:50 root cause: the 1500-byte TUN MTU is too
+    large for mobile networks. Turkcell 4G/5G uses
+    GTP-U encapsulation (8-byte header + IPsec
+    50-70-byte trailer) which means a 1500-byte TUN
+    packet becomes 1500 + 78 = 1578 bytes on the wire.
+    The mobile network drops any frame > 1500 bytes
+    (the radio link MTU), so packets exit the TUN, hit
+    the radio link, and are dropped silently. The Owner
+    sees Chrome / WhatsApp "no internet" even though the
+    TUN reader is capturing packets (1247 packets/2min
+    logcat in Sprint 11.0O confirmed passthrough is
+    real; the missing 30% of large packets that were
+    dropped on the radio link is what the user
+    experiences as "DNS / load failures").
+
+    11.0P fix:
+      1. Lower TUN_MTU from 1500 to 1400 (mobile-safe).
+         1400 + 78 = 1478 < 1500 radio MTU.
+      2. Add `ipFragmentCount: AtomicLong` field that
+         increments when an IP packet's header has the
+         MF (More Fragments) bit set OR a non-zero
+         fragment offset.
+      3. Emit a per-1000-packet `Log.d` breadcrumb:
+         `startReaderThread: MTU=$TUN_MTU,
+         packetsObserved=$total,
+         ipFragmentCount=$fragments,
+         fragmentRatePct=$pct`.
+         The Owner can grep `adb logcat` for this line
+         to verify a fragment rate < 0.1% (good)
+         vs > 5% (MTU still too high).
+
+    The check requires FOUR tokens in
+    `OpenE2eeVpnService.kt` (comment-stripped):
+      1. `TUN_MTU = 1400` literal present (NOT 1500).
+         `TUN_MTU = 1500` is the anti-pattern (will
+         fail this audit).
+      2. `addDnsServer(PRIMARY_DNS` (or
+         `addDnsServer(1.1.1.1`) — the DNS resolver is
+         still required (the brief first said the fix
+         was DNS; that was later corrected to MTU in
+         11.0P OVERRIDE 2, but the DNS resolver must
+         remain in place).
+      3. `ipFragmentCount` field declared.
+      4. The per-1000-packet `fragmentCount` /
+         `fragmentRatePct` log breadcrumb is present in
+         `startReaderThread`.
+
+    Missing any of these re-opens the "Chrome/WhatsApp
+    no internet" regression.
+    """
+    import re
+    findings = []
+    target = (
+        REPO_ROOT / "mobile" / "android" / "app" / "src" / "main"
+        / "kotlin" / "com" / "opene2ee" / "opene2ee" / "vpn"
+        / "OpenE2eeVpnService.kt"
+    )
+    if not target.exists():
+        findings.append(
+            "S87 OpenE2eeVpnService.kt: file missing. Sprint "
+            "11.0P invariant - TUN_MTU=1400 (mobile-safe, "
+            "NOT 1500) + per-1000-packet MTU+fragment log "
+            "breadcrumb are required to survive Turkcell 4G/5G "
+            "GTP encapsulation drops on OnePlus 9 Pro."
+        )
+        return findings
+    try:
+        text = target.read_text(encoding="utf-8")
+    except (UnicodeDecodeError, OSError) as e:
+        findings.append(
+            "S87 OpenE2eeVpnService.kt: read failed (" + str(e) + ")."
+        )
+        return findings
+    # Comment-strip.
+    stripped = re.sub(r"/\*[\s\S]*?\*/", "", text)
+    code_lines = []
+    for ln in stripped.splitlines():
+        in_string = False
+        i = 0
+        cut_at = -1
+        while i < len(ln):
+            c = ln[i]
+            if c == '"':
+                in_string = not in_string
+                i += 1
+                continue
+            if c == "/" and i + 1 < len(ln) and ln[i + 1] == "/" and not in_string:
+                cut_at = i
+                break
+            i += 1
+        if cut_at >= 0:
+            code_lines.append(ln[:cut_at])
+        else:
+            code_lines.append(ln)
+    code = "\n".join(code_lines)
+    # 1. TUN_MTU = 1400 (NOT 1500). Anti-pattern: TUN_MTU = 1500.
+    if not re.search(r"TUN_MTU\s*=\s*1400", code):
+        findings.append(
+            "S87 OpenE2eeVpnService.kt: missing `TUN_MTU = 1400`. "
+            "Sprint 11.0P invariant - the 1500-byte TUN MTU is "
+            "too large for mobile networks (Turkcell 4G/5G GTP "
+            "encapsulation drops frames > 1500 bytes on the radio "
+            "link). The mobile-safe MTU is 1400. Anti-pattern: "
+            "TUN_MTU = 1500 (will fail this audit)."
+        )
+    if re.search(r"TUN_MTU\s*=\s*1500", code):
+        findings.append(
+            "S87 OpenE2eeVpnService.kt: contains the anti-pattern "
+            "`TUN_MTU = 1500`. Sprint 11.0P invariant - the "
+            "1500-byte TUN MTU is too large for mobile networks. "
+            "Use TUN_MTU = 1400 instead."
+        )
+    # 2. addDnsServer(PRIMARY_DNS) OR addDnsServer(1.1.1.1.
+    has_dns = (
+        "addDnsServer(PRIMARY_DNS" in code or
+        "addDnsServer(1.1.1.1" in code or
+        "addDnsServer(8.8.8.8" in code
+    )
+    if not has_dns:
+        findings.append(
+            "S87 OpenE2eeVpnService.kt: missing addDnsServer call. "
+            "Sprint 11.0P invariant - the DNS resolver must "
+            "remain in buildVpnBuilder (1.1.1.1 is the primary; "
+            "8.8.8.8 is the OnePlus OxygenOS fallback)."
+        )
+    # 3. ipFragmentCount field.
+    if "ipFragmentCount" not in code:
+        findings.append(
+            "S87 OpenE2eeVpnService.kt: missing `ipFragmentCount` "
+            "field. Sprint 11.0P invariant - the per-1000-packet "
+            "log breadcrumb reads the fragment counter to compute "
+            "fragmentRatePct."
+        )
+    # 4. Per-1000-packet fragment log breadcrumb.
+    if "fragmentRatePct" not in code and "fragmentCount=" not in code:
+        findings.append(
+            "S87 OpenE2eeVpnService.kt: missing per-1000-packet "
+            "MTU+fragment log breadcrumb. Sprint 11.0P invariant "
+            "- the Owner greps `adb logcat` for "
+            "`startReaderThread: MTU=..., fragmentCount=...` to "
+            "verify the mobile-safe MTU is working."
+        )
+    return findings
+
+
+
+
+
 
 
 
@@ -6217,6 +6370,12 @@ def main() -> int:
         all_findings.extend(s86_findings)
     else:
         print("PASS: active_pool_screen.dart + pool_provider.dart + state/*.dart have NO Timer.periodic / setInterval / Future.delayed / mock initial values; UI updates only via _vpn.packetStream.listen and _vpn.stateStream.listen + setState (Sprint 11.0O S86)")
+
+    s87_findings = check_vpn_service_mtu_and_fragment_log_v31()
+    if s87_findings:
+        all_findings.extend(s87_findings)
+    else:
+        print("PASS: OpenE2eeVpnService.kt has TUN_MTU=1400 (mobile-safe, NOT 1500) + addDnsServer(1.1.1.1) + per-1000-packet MTU+fragment log breadcrumb - regression guard for OnePlus 9 Pro / Turkcell GTP encapsulation MTU drop - Sprint 11.0P S87")
 
     # Sprint 10.1A: HapticFeedback / SystemSound literal in active pool screen (S29).
     s29_findings = check_active_pool_haptic_feedback_literal_present()

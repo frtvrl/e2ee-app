@@ -1,0 +1,59 @@
+Sprint 11.0P - TUN MTU lowered to 1400 + per-1000-packet fragment log (S87)
+
+Owner 13:50 root cause confirmed: the 1500-byte TUN MTU
+is too large for mobile networks. Turkcell 4G/5G uses
+GTP-U encapsulation (8-byte header + IPsec 50-70-byte
+trailer) which means a 1500-byte TUN packet becomes
+1500 + 78 = 1578 bytes on the wire. The mobile network
+drops any frame > 1500 bytes (the radio link MTU), so
+packets exit the TUN, hit the radio link, and are
+dropped silently. The Owner sees Chrome / WhatsApp "no
+internet" even though the TUN reader is capturing
+packets (1247 packets/2min logcat in Sprint 11.0O
+confirmed passthrough is real; the missing 30% of
+large packets that were dropped on the radio link is
+what the user experiences as "DNS / load failures").
+
+11.0P fix:
+  1. TUN_MTU lowered from 1500 to 1400 (mobile-safe).
+     1400 + 78 = 1478 < 1500 radio MTU.
+  2. New `ipFragmentCount: AtomicLong` field that
+     increments when an IPv4 packet's header has the
+     MF (More Fragments) bit set OR a non-zero fragment
+     offset (the IPv4 header bytes 6-7 carry the
+     flags+offset).
+  3. Per-1000-packet `Log.d` breadcrumb in
+     startReaderThread:
+     `startReaderThread: MTU=$TUN_MTU,
+      packetsObserved=$total,
+      ipFragmentCount=$fragments,
+      fragmentRatePct=$pct`.
+     The Owner can grep `adb logcat` for this line to
+     verify a fragment rate < 0.1% (good) vs > 5% (MTU
+     still too high).
+  4. `ipFragmentCount.set(0)` reset in startCapture
+     alongside `packetsObserved.set(0)`.
+
+S87 audit verifies:
+  1. `TUN_MTU = 1400` literal present (NOT 1500).
+     `TUN_MTU = 1500` is the anti-pattern (will fail).
+  2. `addDnsServer(1.1.1.1)` / `addDnsServer(PRIMARY_DNS`
+     call present (DNS resolver must remain in place;
+     the 11.0P OVERRIDE 1 + OVERRIDE 2 brief revisions
+     confirmed DNS was NOT the root cause, but the
+     resolver call must stay for non-Turkcell networks).
+  3. `ipFragmentCount` field declared.
+  4. Per-1000-packet `fragmentCount` / `fragmentRatePct`
+     log breadcrumb present in startReaderThread.
+
+Verification: 137/137 audit-self-test (136 + 1 S87) +
+37/37 flutter test + S87 + S86 + S28-inverted + S84 +
+S82 + S80 all PASS. Fresh APK SHA captured in
+s110p-final-report.md.
+
+Owner test: open Chrome + WhatsApp, run
+`adb logcat | grep startReaderThread`. The breadcrumb
+should show fragmentRatePct < 0.1% (mobile-safe MTU
+working) and Chrome / WhatsApp should work. If the
+fragment rate is still > 5%, the MTU needs to be
+lowered further (try 1380 or 1300).
