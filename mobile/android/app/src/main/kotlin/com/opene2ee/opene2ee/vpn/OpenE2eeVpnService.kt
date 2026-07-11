@@ -1531,10 +1531,68 @@ class OpenE2eeVpnService : VpnService() {
             // This Log.d confirms the request was
             // actually issued.
             Log.d(TAG, "DNS: ConnectivityManager.requestNetwork(TRANSPORT_VPN) start")
+            // Sprint 11.0X — 5s activeNetwork FALLBACK.
+            // Owner 21:08 logcat: requestNetwork start
+            // breadcrumb appeared but the callback NEVER
+            // fired (for 1 minute) on OnePlus OxygenOS.
+            // The pre-11.0X code only logged inside the
+            // onAvailable/onUnavailable lambdas, so when
+            // the callback was never invoked there was
+            // no second breadcrumb. 11.0X adds:
+            //   (a) An AtomicBoolean flag `callbackFired`
+            //       set true in BOTH onAvailable AND
+            //       onUnavailable (so we know the
+            //       callback WAS invoked even if the
+            //       result is "unavailable").
+            //   (b) A Handler.postDelayed Runnable that
+            //       fires after 5 seconds. If the flag
+            //       is still false, we attempt the
+            //       activeNetwork fallback: read
+            //       `cm.activeNetwork`, check
+            //       `getNetworkCapabilities(activeNet)
+            //       .hasTransport(TRANSPORT_VPN)`,
+            //       and if true call
+            //       `bindProcessToNetwork(activeNet)`.
+            //   (c) Log.e with Magisk DenyList
+            //       troubleshooting hint if BOTH paths
+            //       fail (so the Owner + Mavis can see
+            //       the root cause in logcat).
+            val callbackFired = java.util.concurrent.atomic.AtomicBoolean(false)
+            val fallbackHandler = Handler(Looper.getMainLooper())
+            val fallbackRunnable = Runnable {
+                if (!callbackFired.get()) {
+                    Log.d(TAG, "DNS: NetworkCallback TIMEOUT (5s) - attempting activeNetwork fallback")
+                    try {
+                        val activeNet = cm.activeNetwork
+                        if (activeNet != null) {
+                            val nc = cm.getNetworkCapabilities(activeNet)
+                            if (nc != null && nc.hasTransport(NetworkCapabilities.TRANSPORT_VPN)) {
+                                val bindResult = cm.bindProcessToNetwork(activeNet)
+                                Log.d(TAG, "DNS: FALLBACK bindProcessToNetwork(activeNetwork) result=$bindResult")
+                                if (!bindResult) {
+                                    Log.e(TAG, "DNS: FALLBACK bind returned false. Check Magisk DenyList (Settings > Magisk > DenyList - ensure opene2ee is NOT in the list).")
+                                }
+                            } else {
+                                Log.e(TAG, "DNS: FALLBACK activeNetwork has NO TRANSPORT_VPN. VPN profile not established. Check: (1) Magisk DenyList - opene2ee must NOT be in the list; (2) OnePlus OxygenOS Battery optimization - exclude opene2ee; (3) Android 14 foreground service type - confirm the foreground service is running.")
+                            }
+                        } else {
+                            Log.e(TAG, "DNS: FALLBACK activeNetwork is NULL. VPN profile not established. Owner troubleshooting: (1) Magisk DenyList: Settings > Magisk > DenyList - remove opene2ee if listed; (2) confirm VPN toggle is ON in system Settings; (3) reboot device to reset VPN subsystem.")
+                        }
+                    } catch (e: Throwable) {
+                        Log.e(TAG, "DNS: FALLBACK failed: ${e.message}")
+                    }
+                }
+            }
+            fallbackHandler.postDelayed(fallbackRunnable, 5_000L)
             cm.requestNetwork(request, object : ConnectivityManager.NetworkCallback() {
                 override fun onAvailable(network: Network) {
                     // (4a) NetworkCallback.onAvailable
-                    // success breadcrumb.
+                    // success breadcrumb. Set the flag
+                    // + cancel the 5s fallback (the happy
+                    // path is reached, no need for the
+                    // activeNetwork probe).
+                    callbackFired.set(true)
+                    fallbackHandler.removeCallbacks(fallbackRunnable)
                     Log.d(TAG, "DNS: NetworkCallback.onAvailable (VPN network up), attempting bindProcessToNetwork")
                     try {
                         // (5) bindProcessToNetwork result
@@ -1554,11 +1612,13 @@ class OpenE2eeVpnService : VpnService() {
                 }
                 override fun onUnavailable() {
                     // (4b) NetworkCallback.onUnavailable
-                    // failure breadcrumb. Replaces the
-                    // pre-11.0W `Log.w` with a `Log.d`
-                    // so the Owner can `adb logcat -s
-                    // OpenE2eeVpnService:V` and confirm
-                    // the failure path was reached.
+                    // failure breadcrumb. Set the flag
+                    // + cancel the 5s fallback (we got a
+                    // definitive "no VPN network" answer,
+                    // the activeNetwork probe would not
+                    // help).
+                    callbackFired.set(true)
+                    fallbackHandler.removeCallbacks(fallbackRunnable)
                     Log.d(TAG, "DNS: NetworkCallback.onUnavailable (no VPN network for bindProcessToNetwork)")
                     try { cm.unregisterNetworkCallback(this) } catch (_: Throwable) {}
                 }

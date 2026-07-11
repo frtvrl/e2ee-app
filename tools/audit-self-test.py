@@ -24,6 +24,7 @@ check_vpn_service_passthrough_count_invariant_v36 (S93),
 check_manifest_change_network_state_v37 (S94),
 check_stop_capture_ring_clear_invariant_v38 (S95),
 check_check_private_dns_bind_5_logd_invariant_v39 (S96),
+check_check_private_dns_5s_fallback_invariant_v40 (S97),
 check_active_pool_haptic_feedback_literal_present (S29),
 check_pool_provider_debug_state_fields (S33),
 check_active_pool_scaffold_messenger_snackbar (S34),
@@ -173,12 +174,13 @@ S50 cases: 2 (1 PASS + 1 FAIL — `OpenE2EE Şifreleme Doğrulama` foreground no
 S51 cases: 2 (1 PASS + 1 FAIL — `i < 30` + `Timer.periodic` 30-call loop in active_pool_screen.dart).
 S52 cases: 2 (1 PASS + 1 FAIL — `sendSummary` method + `/api/v1/sessions/` path + 6 fields in telemetry_service.dart).
 
-Total: 146 cases (72 pre-Sprint 11.0A + 16 from S45-S52 + 24 from
+Total: 147 cases (72 pre-Sprint 11.0A + 16 from S45-S52 + 24 from
 S53-S60 + 24 from S61-S72 + 1 from S73 + 1 from S74 + 1 from
 S76 + 1 from S77 + 1 from S78 + 1 from S79 + 1 from S80 +
 1 from S82 + 1 from S84 + 1 from S86 + 1 from S87 +
 1 from S88 + 1 from S89 + 1 from S91 + 1 from S92 +
-1 from S93 + 1 from S94 + 1 from S95 + 1 from S96).
+1 from S93 + 1 from S94 + 1 from S95 + 1 from S96 +
+1 from S97).
 Sprint 11.0Q adds 1 new selftest case for S88 (2-level
 VPN disconnect fallback: .stop with 3s timeout +
 MainActivity.disconnectVpn hard-stop) — the
@@ -1007,6 +1009,68 @@ def run_s96_check(opene2ee_vpn_service_text):
         if token not in stripped:
             findings.append(
                 "S96 fail (missing Log.d breadcrumb token `"
+                + token + "` for " + label + ")"
+            )
+    return findings
+
+
+def run_s97_check(opene2ee_vpn_service_text):
+    """Sprint 11.0X: checkPrivateDnsAndBindToVpn has
+    5s activeNetwork FALLBACK when the NetworkCallback
+    never fires (S97).
+
+    Owner 21:08 symptom: pre-11.0X the function only
+    logged inside the onAvailable / onUnavailable
+    lambdas. On OnePlus 9 Pro OxygenOS the callback
+    NEVER fired (for 1 minute) - so the function
+    showed the `requestNetwork start` Log.d but
+    never showed onAvailable/onUnavailable/
+    bindProcessToNetwork. The Owner could not tell
+    from logcat whether the callback was just slow
+    or whether the request was silently dropped.
+
+    This check asserts the S97 invariant on
+    OpenE2eeVpnService.kt: 8 token substrings
+    (the 5s fallback) are present:
+      a. `callbackFired` (the AtomicBoolean flag).
+      b. `Handler(Looper.getMainLooper())` (the
+         fallback Handler).
+      c. `postDelayed(` (the 5s scheduling).
+      d. `NetworkCallback TIMEOUT` (the fallback
+         log breadcrumb).
+      e. `FALLBACK bindProcessToNetwork(activeNetwork)`
+         (the fallback bind log).
+      f. `hasTransport(NetworkCapabilities.TRANSPORT_VPN)`
+         (the TRANSPORT_VPN check on the active
+         network).
+      g. `Magisk DenyList` (the Owner
+         troubleshooting hint in the Log.e).
+      h. `removeCallbacks(fallbackRunnable)` (the
+         fallback cancellation in the lambdas).
+    """
+    import re
+    findings = []
+    if opene2ee_vpn_service_text is None:
+        findings.append("S97 fail (OpenE2eeVpnService.kt text missing)")
+        return findings
+    stripped = re.sub(
+        r"/\*.*?\*/", "", opene2ee_vpn_service_text, flags=re.DOTALL
+    )
+    stripped = re.sub(r"//[^\n]*", "", stripped)
+    required_tokens = {
+        "a.callbackFired flag": "callbackFired",
+        "b.fallback Handler": "Handler(Looper.getMainLooper())",
+        "c.postDelayed scheduling": "postDelayed(",
+        "d.fallback timeout breadcrumb": "NetworkCallback TIMEOUT",
+        "e.fallback bind log": "FALLBACK bindProcessToNetwork(activeNetwork)",
+        "f.TRANSPORT_VPN check": "hasTransport(NetworkCapabilities.TRANSPORT_VPN)",
+        "g.Magisk DenyList hint": "Magisk DenyList",
+        "h.removeCallbacks in lambdas": "removeCallbacks(fallbackRunnable)",
+    }
+    for label, token in required_tokens.items():
+        if token not in stripped:
+            findings.append(
+                "S97 fail (missing 5s fallback token `"
                 + token + "` for " + label + ")"
             )
     return findings
@@ -5415,6 +5479,74 @@ cases = [
            "                    // (4b) onUnavailable breadcrumb.\n"
            "                    Log.d(TAG, \"DNS: NetworkCallback.onUnavailable (no VPN network for bindProcessToNetwork)\")\n"
            "                    try { cm.unregisterNetworkCallback(this) } catch (_: Throwable) {}\n"
+           "                }\n"
+           "            })\n"
+           "        } catch (e: Throwable) {\n"
+           "            Log.w(TAG, \"DNS: checkPrivateDnsAndBindToVpn failed: ${e.message}\")\n"
+           "        }\n"
+           "    }\n"
+           "}\n",
+       ), []),
+      # S97 case (Sprint 11.0X - new) - OpenE2eeVpnService
+      # .kt checkPrivateDnsAndBindToVpn has 5s activeNetwork
+      # FALLBACK when the NetworkCallback never fires
+      # (callbackFired AtomicBoolean + Handler postDelayed
+      # 5s + NetworkCallback TIMEOUT breadcrumb + FALLBACK
+      # bindProcessToNetwork activeNetwork + hasTransport
+      # TRANSPORT_VPN check + Magisk DenyList hint).
+      # Regression guard for the Owner 21:08 'NetworkCallback
+      # never fires for 1 minute on OnePlus OxygenOS' symptom.
+      # Total selftest: 146 + 1 = 147.
+      ("S97 PASS (OpenE2eeVpnService.kt checkPrivateDnsAndBindToVpn has 5s activeNetwork fallback - regression guard for OnePlus 9 Pro OxygenOS 'callback never fires' symptom)",
+       run_s97_check, (
+           "package com.opene2ee.opene2ee.vpn\n"
+           "import android.net.ConnectivityManager\n"
+           "import android.net.LinkProperties\n"
+           "import android.net.Network\n"
+           "import android.net.NetworkCapabilities\n"
+           "import android.net.NetworkRequest\n"
+           "import android.os.Handler\n"
+           "import android.os.Looper\n"
+           "import android.util.Log\n"
+           "class OpenE2eeVpnService {\n"
+           "    private fun checkPrivateDnsAndBindToVpn() {\n"
+           "        try {\n"
+           "            Log.d(TAG, \"DNS: checkPrivateDnsAndBindToVpn: ENTRY\")\n"
+           "            val cm = getSystemService(android.content.Context.CONNECTIVITY_SERVICE) as ConnectivityManager\n"
+           "            val request = NetworkRequest.Builder()\n"
+           "                .addTransportType(NetworkCapabilities.TRANSPORT_VPN)\n"
+           "                .build()\n"
+           "            Log.d(TAG, \"DNS: ConnectivityManager.requestNetwork(TRANSPORT_VPN) start\")\n"
+           "            val callbackFired = java.util.concurrent.atomic.AtomicBoolean(false)\n"
+           "            val fallbackHandler = Handler(Looper.getMainLooper())\n"
+           "            val fallbackRunnable = Runnable {\n"
+           "                if (!callbackFired.get()) {\n"
+           "                    Log.d(TAG, \"DNS: NetworkCallback TIMEOUT (5s) - attempting activeNetwork fallback\")\n"
+           "                    val activeNet = cm.activeNetwork\n"
+           "                    if (activeNet != null) {\n"
+           "                        val nc = cm.getNetworkCapabilities(activeNet)\n"
+           "                        if (nc != null && nc.hasTransport(NetworkCapabilities.TRANSPORT_VPN)) {\n"
+           "                            val bindResult = cm.bindProcessToNetwork(activeNet)\n"
+           "                            Log.d(TAG, \"DNS: FALLBACK bindProcessToNetwork(activeNetwork) result=$bindResult\")\n"
+           "                        } else {\n"
+           "                            Log.e(TAG, \"DNS: FALLBACK activeNetwork has NO TRANSPORT_VPN. Check Magisk DenyList.\")\n"
+           "                        }\n"
+           "                    }\n"
+           "                }\n"
+           "            }\n"
+           "            fallbackHandler.postDelayed(fallbackRunnable, 5_000L)\n"
+           "            cm.requestNetwork(request, object : ConnectivityManager.NetworkCallback() {\n"
+           "                override fun onAvailable(network: Network) {\n"
+           "                    callbackFired.set(true)\n"
+           "                    fallbackHandler.removeCallbacks(fallbackRunnable)\n"
+           "                    Log.d(TAG, \"DNS: NetworkCallback.onAvailable (VPN network up)\")\n"
+           "                    val bindResult = cm.bindProcessToNetwork(network)\n"
+           "                    Log.d(TAG, \"DNS: bindProcessToNetwork(vpn) result=$bindResult\")\n"
+           "                }\n"
+           "                override fun onUnavailable() {\n"
+           "                    callbackFired.set(true)\n"
+           "                    fallbackHandler.removeCallbacks(fallbackRunnable)\n"
+           "                    Log.d(TAG, \"DNS: NetworkCallback.onUnavailable (no VPN network)\")\n"
            "                }\n"
            "            })\n"
            "        } catch (e: Throwable) {\n"

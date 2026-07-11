@@ -4378,6 +4378,114 @@ def check_check_private_dns_bind_5_logd_invariant_v39() -> list[str]:
     return findings
 
 
+def check_check_private_dns_5s_fallback_invariant_v40() -> list[str]:
+    """Sprint 11.0X: checkPrivateDnsAndBindToVpn has
+    a 5s activeNetwork FALLBACK when the
+    NetworkCallback never fires (S97).
+
+    Owner 21:08 symptom: pre-11.0X the function
+    only logged inside the onAvailable / onUnavailable
+    lambdas. On OnePlus 9 Pro OxygenOS, the callback
+    NEVER fired (for 1 minute) - so the function
+    showed the `requestNetwork start` Log.d but never
+    showed onAvailable/onUnavailable/bindProcessToNetwork.
+    The Owner could not tell from logcat whether the
+    callback was just slow or whether the request was
+    silently dropped.
+
+    11.0X fix: 3 new invariants:
+      1. NetworkCallback.onAvailable log (S96
+         invariant #4a) PLUS a callbackFired flag
+         set in BOTH onAvailable AND onUnavailable,
+         so we know the callback was invoked even if
+         the result is "unavailable".
+      2. A 5s Handler.postDelayed fallback Runnable
+         that, if callbackFired is still false, reads
+         `cm.activeNetwork`, checks
+         `getNetworkCapabilities(activeNet)
+         .hasTransport(TRANSPORT_VPN)`, and if true
+         calls `bindProcessToNetwork(activeNet)`.
+      3. Log.e with Magisk DenyList / OnePlus
+         OxygenOS battery optimization / foreground
+         service type troubleshooting hints if BOTH
+         paths fail (so the Owner + Mavis can see
+         the root cause in logcat).
+
+    The check requires the following token substrings
+    in `OpenE2eeVpnService.kt` (comment-stripped):
+      a. `callbackFired` (the AtomicBoolean flag).
+      b. `Handler(Looper.getMainLooper())` (the
+         fallback Handler).
+      c. `postDelayed(` (the 5s scheduling).
+      d. `NetworkCallback TIMEOUT` (the fallback log
+         breadcrumb).
+      e. `FALLBACK bindProcessToNetwork(activeNetwork)`
+         (the fallback bind log).
+      f. `hasTransport(NetworkCapabilities.TRANSPORT_VPN)`
+         (the TRANSPORT_VPN check on the active
+         network).
+      g. `Magisk DenyList` (the Owner troubleshooting
+         hint in the Log.e).
+      h. `removeCallbacks(fallbackRunnable)` present
+         in BOTH the onAvailable AND onUnavailable
+         lambda (so the fallback Handler is cancelled
+         when the happy path is reached).
+
+    Missing any of the 3 invariants re-opens the
+    Owner 21:08 "callback never fires for 1 minute"
+    regression - the Owner would not see any
+    breadcrumb for 1 minute and would not be able to
+    recover via the activeNetwork fallback.
+    """
+    import re
+    findings = []
+    service_path = (
+        REPO_ROOT / "mobile" / "android" / "app" / "src"
+        / "main" / "kotlin" / "com" / "opene2ee" / "opene2ee"
+        / "vpn" / "OpenE2eeVpnService.kt"
+    )
+    if not service_path.exists():
+        findings.append(
+            "S97 OpenE2eeVpnService.kt: file missing."
+        )
+        return findings
+    try:
+        text = service_path.read_text(encoding="utf-8")
+    except (UnicodeDecodeError, OSError) as e:
+        findings.append(
+            "S97 OpenE2eeVpnService.kt: read failed ("
+            + str(e) + ")."
+        )
+        return findings
+    stripped = re.sub(r"/\*.*?\*/", "", text, flags=re.DOTALL)
+    stripped = re.sub(r"//[^\n]*", "", stripped)
+    # Required token substrings (8 of them).
+    required_tokens = {
+        "a.callbackFired flag": "callbackFired",
+        "b.fallback Handler": "Handler(Looper.getMainLooper())",
+        "c.postDelayed scheduling": "postDelayed(",
+        "d.fallback timeout breadcrumb": "NetworkCallback TIMEOUT",
+        "e.fallback bind log": "FALLBACK bindProcessToNetwork(activeNetwork)",
+        "f.TRANSPORT_VPN check": "hasTransport(NetworkCapabilities.TRANSPORT_VPN)",
+        "g.Magisk DenyList hint": "Magisk DenyList",
+        "h.removeCallbacks in lambdas": "removeCallbacks(fallbackRunnable)",
+    }
+    for label, token in required_tokens.items():
+        if token not in stripped:
+            findings.append(
+                "S97 OpenE2eeVpnService.kt: missing 5s "
+                "fallback token `" + token + "` ("
+                + label + "). Sprint 11.0X invariant - "
+                "checkPrivateDnsAndBindToVpn must include "
+                "the 5s activeNetwork fallback so the "
+                "Owner recovers when the NetworkCallback "
+                "never fires (OnePlus OxygenOS regression "
+                "guard for Owner 21:08 'callback never "
+                "fires for 1 minute' symptom)."
+            )
+    return findings
+
+
 
 
 
@@ -7554,6 +7662,12 @@ def main() -> int:
         all_findings.extend(s96_findings)
     else:
         print("PASS: OpenE2eeVpnService.kt checkPrivateDnsAndBindToVpn has 5 Log.d breadcrumbs (ENTRY, isPrivateDnsActive, requestNetwork start, onAvailable/onUnavailable, bindProcessToNetwork result) - regression guard for Owner 20:45 'log YOK logcatte' symptom - Sprint 11.0W S96")
+
+    s97_findings = check_check_private_dns_5s_fallback_invariant_v40()
+    if s97_findings:
+        all_findings.extend(s97_findings)
+    else:
+        print("PASS: OpenE2eeVpnService.kt checkPrivateDnsAndBindToVpn has 5s activeNetwork fallback (callbackFired flag + Handler postDelayed + NetworkCallback TIMEOUT breadcrumb + FALLBACK bindProcessToNetwork activeNetwork + hasTransport TRANSPORT_VPN check + Magisk DenyList troubleshooting hint) - regression guard for Owner 21:08 'NetworkCallback never fires for 1 minute' symptom - Sprint 11.0X S97")
 
     # Sprint 10.1A: HapticFeedback / SystemSound literal in active pool screen (S29).
     s29_findings = check_active_pool_haptic_feedback_literal_present()
